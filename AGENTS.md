@@ -91,6 +91,24 @@ here.
   fluff (e.g. `run.py imports cleanly with no network access`). Docker /
   CLI entrypoints should call the real API (`import run; run.load_model()`)
   and let failures surface as exceptions.
+- **`Path(__file__)` in the Colab export — know which case you're in
+  (MUST):** `scripts/export-colab-notebook.py` inlines each pipeline stage
+  script's *body* directly as notebook-cell source, not loaded from a real
+  file — that top-level code genuinely has no `__file__` in Colab, which is
+  why the exporter rewrites `ROOT = Path(__file__).resolve().parents[1]` to
+  `ROOT = Path.cwd()` specifically in those cells (`FILE_ROOT_RE`). A
+  `src/wacv/*.py` **library module** is a different case: the exporter
+  `%%writefile`'s it to real disk and it is then loaded via a normal
+  `import` statement, so Python's import system sets `__file__` correctly —
+  `Path(__file__)` is safe there (already used this way in
+  `config.py::load_config`'s default root; verified empirically that
+  `%%writefile`-then-`import` preserves `__file__`, both locally and by the
+  fact this exact pattern already runs successfully in real Colab training
+  runs). Don't "fix" a working `Path(__file__)` in a library module by
+  assuming every `__file__` use is broken under Colab, and don't add
+  `Path(__file__)` to a *stage script*'s top level. When in doubt, check
+  which mechanism applies (inlined script body vs. `%%writefile`+`import`)
+  before changing either direction.
 
 </always_on>
 
