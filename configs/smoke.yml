@@ -1,6 +1,6 @@
 model:
   name: resnet50
-  pretrained: true
+  pretrained: false
   dropout: 0.0
 
 data:
