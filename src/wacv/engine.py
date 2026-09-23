@@ -16,6 +16,8 @@ from tqdm import tqdm
 
 from src.wacv.checkpoint import CheckpointManager
 from src.wacv.config import DeviceName, ExperimentConfig
+from src.wacv.evaluation import l1_distance, mean_accuracy, predict_probabilities
+from src.wacv.metrics import evaluate_ranking
 from src.wacv.tracking import RunTracker
 
 BatchIterable = Iterable[tuple[torch.Tensor, torch.Tensor]]
@@ -27,6 +29,15 @@ class FitResult:
     end_epoch: int
     global_step: int
     best_metric: float
+
+
+@dataclass(frozen=True)
+class RankingEvalData:
+    """Track-2 val queries + gallery for per-epoch ranking metrics."""
+
+    queries: np.ndarray
+    gallery_attrs: np.ndarray
+    gallery_loader: BatchIterable
 
 
 def resolve_device(requested: DeviceName) -> torch.device:
@@ -143,7 +154,28 @@ class Trainer:
             raise ValueError("Validation loader is empty")
         return total_loss / total_samples
 
-    def fit(self, train_loader: BatchIterable, val_loader: BatchIterable) -> FitResult:
+    def _ranking_metrics(self, ranking: RankingEvalData) -> dict[str, float]:
+        probabilities = predict_probabilities(
+            self.ema_model,
+            ranking.gallery_loader,
+            self.device,
+            progress=False,
+        )
+        metrics = evaluate_ranking(
+            ranking.queries,
+            ranking.gallery_attrs,
+            l1_distance(ranking.queries, probabilities),
+        )
+        metrics["mA"] = mean_accuracy(probabilities, ranking.gallery_attrs)
+        return metrics
+
+    def fit(
+        self,
+        train_loader: BatchIterable,
+        val_loader: BatchIterable,
+        *,
+        ranking: RankingEvalData | None = None,
+    ) -> FitResult:
         start_epoch = 0
         global_step = 0
         best_metric = float("inf")
@@ -162,7 +194,12 @@ class Trainer:
             )
 
         end_epoch = start_epoch - 1
-        for epoch in range(start_epoch, self.config.optimization.epochs):
+        epoch_bar = tqdm(
+            range(start_epoch, self.config.optimization.epochs),
+            desc="epochs",
+            disable=not self.config.run.progress,
+        )
+        for epoch in epoch_bar:
             train_loss, step_delta = self._train_epoch(train_loader, epoch)
             global_step += step_delta
             val_loss = self._validate_epoch(val_loader, epoch)
@@ -170,11 +207,22 @@ class Trainer:
             improved = val_loss < best_metric
             if improved:
                 best_metric = val_loss
-            metrics = {
+            metrics: dict[str, float] = {
                 "train/loss": train_loss,
                 "val/loss": val_loss,
                 "learning_rate": self.optimizer.param_groups[0]["lr"],
             }
+            postfix: dict[str, str] = {
+                "train": f"{train_loss:.4f}",
+                "val": f"{val_loss:.4f}",
+            }
+            if ranking is not None:
+                ranking_metrics = self._ranking_metrics(ranking)
+                for key, value in ranking_metrics.items():
+                    metrics[f"val/{key}"] = value
+                postfix["mAP"] = f"{ranking_metrics['mAP']:.4f}"
+                postfix["R1"] = f"{ranking_metrics['Rank-1']:.4f}"
+            epoch_bar.set_postfix(ordered_dict=dict(postfix))
             self.tracker.log_metrics(epoch, metrics)
             self.checkpoints.save(
                 self.tracker.checkpoint_dir / "last.pt",
