@@ -1,32 +1,23 @@
 """Train an attribute classifier from a validated YAML experiment config."""
 
-# ruff: noqa: E402
-
 from __future__ import annotations
 
 import argparse
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+if TYPE_CHECKING:
+    from src.wacv.config import ExperimentConfig
 
-from src.wacv.attributes import ATTRIBUTE_NAMES, NUM_ATTRIBUTES
-from src.wacv.config import ExperimentConfig, load_config
-from src.wacv.data import (
-    IMAGE_TRANSFORM,
-    TRAIN_TRANSFORM,
-    AttributeDataset,
-    load_gt,
-)
-from src.wacv.engine import Trainer, resolve_device, seed_everything
-from src.wacv.models import build_model
-from src.wacv.tracking import RunTracker
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,6 +33,14 @@ def parse_args() -> argparse.Namespace:
 def build_loaders(
     config: ExperimentConfig, device: torch.device
 ) -> tuple[DataLoader, DataLoader, torch.Tensor]:
+    from src.wacv.attributes import ATTRIBUTE_NAMES
+    from src.wacv.data import (
+        IMAGE_TRANSFORM,
+        TRAIN_TRANSFORM,
+        AttributeDataset,
+        load_gt,
+    )
+
     annotation_root = config.data.root / "annotations" / "task1"
     train_gt = load_gt(annotation_root / "train" / "gt.csv")
     val_gt = load_gt(annotation_root / "val" / "gt.csv")
@@ -81,6 +80,12 @@ def build_loaders(
 
 
 def main() -> None:
+    from src.wacv.attributes import NUM_ATTRIBUTES
+    from src.wacv.config import load_config
+    from src.wacv.engine import Trainer, resolve_device, seed_everything
+    from src.wacv.models import build_model
+    from src.wacv.tracking import RunTracker
+
     config = load_config(parse_args().config)
     seed_everything(config.run.seed)
     device = resolve_device(config.run.device)

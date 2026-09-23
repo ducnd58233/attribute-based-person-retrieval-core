@@ -5,17 +5,15 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import sys
 from pathlib import Path
 from typing import Any
 
 import torch
 
-from src.wacv.attributes import NUM_ATTRIBUTES
-from src.wacv.checkpoint import load_model_weights
-from src.wacv.config import load_config
-from src.wacv.models import build_model
-
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
 def parse_args() -> argparse.Namespace:
@@ -50,6 +48,11 @@ def parse_args() -> argparse.Namespace:
 def _export_weights(
     checkpoint: Path, config_path: Path, destination: Path
 ) -> dict[str, Any]:
+    from src.wacv.attributes import NUM_ATTRIBUTES
+    from src.wacv.checkpoint import load_model_weights
+    from src.wacv.config import load_config
+    from src.wacv.models import build_model
+
     config = load_config(config_path)
     model = build_model(
         config.model.model_copy(update={"pretrained": False}),

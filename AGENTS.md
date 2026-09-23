@@ -80,11 +80,17 @@ here.
 - **No lint / type suppresses (MUST):** do not add `# noqa`, `# ruff: noqa`,
   `# type: ignore`, `# pyright: ignore`, or widen
   `pyproject.toml` ignore / per-file-ignore lists to land a change. Fix the
-  code (or the typed API) so the existing rules pass.
+  code (or the typed API) so the existing rules pass. Prefer deferred
+  `src.wacv` imports inside functions in `scripts/` over path-hack `# noqa`.
 - **No unrequested code (MUST):** only add files and logic the current task
   acceptance criteria require. Prefer a script under `scripts/` over new
   packages, fixtures, or README sections. Delete scaffolding that is not
   needed for train / evaluate / package / submit.
+- **No decorative runtime strings (MUST):** do not add print/log messages
+  whose only job is to narrate that a check "passed cleanly" or similar
+  fluff (e.g. `run.py imports cleanly with no network access`). Docker /
+  CLI entrypoints should call the real API (`import run; run.load_model()`)
+  and let failures surface as exceptions.
 
 </always_on>
 
