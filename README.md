@@ -11,12 +11,31 @@ superproject) — start there, not here, for context.
 conda env create -f environment.yml
 conda activate wacv            # required before every uv command, see AGENTS.md
 uv sync
+uv run pre-commit install      # once per checkout
 ```
 
 - Setup datasets
 ```sh
 uv run scripts/download-dataset.py
 ```
+
+## Training and evaluation
+
+Experiments are config-driven (`configs/*.yml`, validated by
+`src/wacv/config.py`); a smoke config (`configs/smoke.yml`, 1 epoch on a
+64-image slice) exists to check the pipeline runs before committing to a
+real training config like `configs/convnext_baseline.yml`.
+
+```sh
+uv run python scripts/train.py --config configs/smoke.yml
+uv run python scripts/evaluate.py --config configs/smoke.yml \
+    --checkpoint runs/smoke/checkpoints/best.pt
+```
+
+Each run writes to `run.output_dir/run.name/` (default `runs/<name>/`):
+`config.json` (the resolved config), `metrics.jsonl`, `run.log`, and
+`checkpoints/{last,best}.pt`. Set `run.resume` to a checkpoint path to
+continue training from it.
 
 ## Testing a submission before upload
 

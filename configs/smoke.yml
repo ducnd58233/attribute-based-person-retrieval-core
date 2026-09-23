@@ -1,0 +1,31 @@
+model:
+  name: resnet50
+  pretrained: true
+  dropout: 0.0
+
+data:
+  root: data
+  batch_size: 8
+  num_workers: 0
+  limit: 64
+  train_augmentation: false
+
+optimization:
+  epochs: 1
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  pos_weight_clip: 10.0
+  amp: false
+  grad_clip_norm: 1.0
+  ema_decay: 0.999
+  scheduler_factor: 0.1
+  scheduler_patience: 3
+  label_smoothing: 0.0
+
+run:
+  name: smoke
+  output_dir: runs
+  resume: null
+  seed: 42
+  device: auto
+  progress: true

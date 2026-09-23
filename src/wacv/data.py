@@ -21,6 +21,17 @@ IMAGE_TRANSFORM = transforms.Compose(
     ]
 )
 
+TRAIN_TRANSFORM = transforms.Compose(
+    [
+        transforms.Resize((256, 128)),
+        transforms.RandomHorizontalFlip(),
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        transforms.RandomErasing(p=0.25),
+    ]
+)
+
 
 def load_gt(csv_path: Path) -> pd.DataFrame:
     """Load a gt.csv: one row per image, `image` plus the 40 attribute columns."""
@@ -58,5 +69,8 @@ class AttributeDataset(Dataset):
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
         row = self._gt.iloc[index]
         image = Image.open(self._images_root / row["image"]).convert("RGB")
+        transformed = self._transform(image)
+        if not isinstance(transformed, torch.Tensor):
+            raise TypeError("AttributeDataset transforms must return a tensor")
         attrs = torch.from_numpy(row[list(ATTRIBUTE_NAMES)].to_numpy(dtype=np.float32))
-        return self._transform(image), attrs
+        return transformed, attrs
