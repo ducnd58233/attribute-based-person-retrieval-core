@@ -9,8 +9,9 @@
 # Usage (from the repo root, after `conda activate wacv`):
 #   docker compose -f deployments/docker/docker-compose.yml run --rm submission-test
 #
-# Point SUBMISSION_DIR / INPUT_DATA_DIR at whatever you're testing before
-# running, either via a .env file next to this one or exported in your shell.
+# Point SUBMISSION_DIR at the folder you're about to zip (default:
+# ../../build/submission), either via a .env next to this file or exported
+# in your shell.
 
 services:
   submission-test:
@@ -21,5 +22,4 @@ services:
     working_dir: /app
     volumes:
       - ${SUBMISSION_DIR:-../../build/submission}:/app:ro
-      - ${INPUT_DATA_DIR:-../../data/sample_input_data}:/app/input_data:ro
     command: ["-c", "import run; print('run.py imports cleanly with no network access')"]
