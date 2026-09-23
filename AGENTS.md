@@ -48,11 +48,11 @@ here.
 
   ```sh
   conda env create -f environment.yml   # once
-  conda activate cv-foundation          # every new shell, before any uv command
+  conda activate wacv                   # every new shell, before any uv command
   uv sync                               # now safe to run
   ```
 
-  Running `uv` without an active `cv-foundation` conda environment is a
+  Running `uv` without an active `wacv` conda environment is a
   defect, not a style preference: `uv` may not even be on `PATH` yet, and
   any GPU extension that links against CUDA/cudnn will pick up the wrong
   (or no) toolkit. Never install `uv` a second way (pipx, a system package

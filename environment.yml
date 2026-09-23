@@ -4,7 +4,7 @@
 # not run inside the organizers' fixed container, only the final packaged
 # submission is. Activate this before doing anything with uv (see
 # AGENTS.md, "conda before uv").
-name: cv-foundation
+name: wacv
 channels:
   - nvidia
   - conda-forge

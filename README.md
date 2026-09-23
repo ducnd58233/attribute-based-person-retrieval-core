@@ -9,7 +9,7 @@ superproject) — start there, not here, for context.
 
 ```sh
 conda env create -f environment.yml
-conda activate cv-foundation   # required before every uv command, see AGENTS.md
+conda activate wacv            # required before every uv command, see AGENTS.md
 uv sync
 ```
 
