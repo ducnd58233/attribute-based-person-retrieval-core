@@ -8,21 +8,26 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
-    # torch/torchvision/numpy/Pillow mirror exactly what the competition's
-    # evaluation container ships (PROBLEM-DETAILS.md, Submission section) —
-    # kept in the dev environment too so nothing gets written against a
-    # convenience library the submission runtime doesn't have.
     "torch",
     "torchvision",
     "numpy>=2.4.0",
     "pillow>=12.3.0",
-    # gt.csv/queries.csv/images.csv (the starter kit's annotation format)
-    # are plain image+attribute tables; pandas is the standard way to load
-    # and join them.
     "pandas>=2.3.0",
     "tqdm>=4.70.1",
     "ipykernel>=7.3.0",
+    "matplotlib>=3.11.2",
 ]
+
+[dependency-groups]
+dev = [
+    "absolufy-imports>=0.3.1",
+    "black>=26.5.1",
+    "gdown>=5.2.0,<6",
+    "pre-commit>=4.6.2",
+    "pyright>=1.1.414",
+    "ruff>=0.16.8",
+]
+
 
 [tool.uv]
 package = false
@@ -109,12 +114,3 @@ max-statements = 40
 max-args = 8
 # Guard-clause chains in the scoring code read better flat than nested.
 max-returns = 8
-
-[dependency-groups]
-dev = [
-    "absolufy-imports>=0.3.1",
-    "black>=26.5.1",
-    "pre-commit>=4.6.2",
-    "pyright>=1.1.414",
-    "ruff>=0.16.8",
-]

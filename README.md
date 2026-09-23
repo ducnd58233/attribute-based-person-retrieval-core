@@ -6,23 +6,16 @@ workspace (`attribute-based-person-retrieval-workspace`, this repo's
 superproject) — start there, not here, for context.
 
 ## Setup
-
+- Setup environment
 ```sh
 conda env create -f environment.yml
 conda activate wacv            # required before every uv command, see AGENTS.md
 uv sync
-uv run pre-commit install      # once per checkout
 ```
 
-## Layout
-
-```text
-deployments/docker/   local mirror of the competition's evaluation container,
-                       for testing a submission zip before upload
-environment.yml         conda: system-level CUDA/cudnn + uv itself
-pyproject.toml          uv: Python dependencies for training/dev
-.pre-commit-config.yaml ruff/black + file hygiene, run via `uv run` (language: system)
-AGENTS.md               rules for agents/contributors working in this repo
+- Setup datasets
+```sh
+uv run scripts/download-dataset.py
 ```
 
 ## Testing a submission before upload
