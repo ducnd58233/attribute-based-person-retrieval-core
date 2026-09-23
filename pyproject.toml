@@ -1,0 +1,113 @@
+[project]
+name = "cv-foundation"
+version = "0.1.0"
+description = "WACV2027 UPAR Challenge Track 2 (Attribute-based Person Retrieval) solution"
+readme = "README.md"
+authors = [
+    { name = "ducnd58233", email = "only4wns@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "certifi>=2026.7.22",
+    "huggingface-hub>=1.32.0",
+    "ipykernel>=7.3.0",
+    "matplotlib>=3.11.2",
+    "pillow>=12.3.0",
+    "torch",
+    "tqdm>=4.70.1",
+]
+
+[tool.uv]
+package = false
+
+[build-system]
+requires = ["uv_build>=0.12.16,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu130" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
+
+[tool.black]
+# Must match requires-python, or Black assumes a newer grammar than the
+# interpreter running the safety check can parse.
+target-version = ["py313"]
+
+# Import sorting is Ruff's `I` rules, not a separate isort pass: the two
+# disagreed on the same file, and one tool owning the rule ends that class of
+# conflict rather than arbitrating it per file.
+[tool.ruff.lint.isort]
+known-first-party = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "--basetemp=.pytest-tmp"
+cache_dir = ".pytest-cache"
+testpaths = ["tests"]
+# Tests import the package the same way scripts/ do (`from src.model_kit ...`),
+# so the project root has to be importable.
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 88
+target-version = "py313"
+
+[tool.ruff.lint]
+# Rules are selected by what they prevent, not by how many they are. The
+# structural ones (PL, ARG, B) are the reason this package stopped threading
+# run state through parameter lists; the rest keep the diff idiomatic.
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # import ordering
+    "UP",   # modern syntax for the pinned Python
+    "B",    # bugbear: real bug shapes, not style
+    "SIM",  # simplification opportunities
+    "RET",  # redundant return branches
+    "C4",   # comprehension clarity
+    "PTH",  # pathlib over os.path
+    "ARG",  # unused arguments, which is what dead threading looks like
+    "PL",   # pylint: complexity and argument-count limits
+    "RUF",  # ruff's own correctness rules
+]
+ignore = [
+    "PLR2004",  # magic values are readable in tensor and schedule math
+    # Fullwidth CJK punctuation is data this package deliberately handles, so
+    # "did you mean the ASCII one" is wrong every time it fires here.
+    "RUF001",
+    "RUF002",
+    "RUF003",
+    # Heavy optional backends (safetensors, huggingface_hub) are imported inside
+    # the functions that use them to keep CLI startup cheap.
+    "PLC0415",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests name their fixtures and assert on constants; neither is a smell there.
+"tests/*" = ["PLR2004", "ARG001"]
+# Re-export lists are grouped by subsystem with comments, which is easier to
+# navigate than one alphabetical run across every layer of the package.
+"src/*/__init__.py" = ["RUF022"]
+
+[tool.ruff.lint.pylint]
+max-statements = 40
+# Matches tests/test_workflow_ports.py: past this, state belongs on an object.
+max-args = 8
+# Guard-clause chains in the scoring code read better flat than nested.
+max-returns = 8
+
+[dependency-groups]
+dev = [
+    "absolufy-imports>=0.3.1",
+    "black>=26.5.1",
+    "pre-commit>=4.6.2",
+    "pyright>=1.1.414",
+    "ruff>=0.16.8",
+]
