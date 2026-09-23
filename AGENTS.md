@@ -50,7 +50,13 @@ here.
   conda env create -f environment.yml   # once
   conda activate wacv                   # every new shell, before any uv command
   uv sync                               # now safe to run
+  uv run pre-commit install             # once per checkout
   ```
+
+  `.pre-commit-config.yaml`'s ruff/black hooks run as `uv run ruff`/`uv run
+  black` (`language: system`, not a pre-commit-managed environment), so a
+  commit made from a shell without the `wacv` env active fails the same way
+  a bare `uv` command does.
 
   Running `uv` without an active `wacv` conda environment is a
   defect, not a style preference: `uv` may not even be on `PATH` yet, and

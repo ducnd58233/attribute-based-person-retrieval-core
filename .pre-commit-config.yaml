@@ -1,0 +1,33 @@
+repos:
+  - repo: local
+    hooks:
+      - id: ruff
+        name: ruff
+        entry: uv run ruff check --fix
+        language: system
+        types: [python]
+
+      - id: black
+        name: black
+        entry: uv run black
+        language: system
+        types: [python]
+
+      # absolufy-imports (pyproject.toml dev group) and a function-length
+      # guard are worth adding once src/ exists and has a shape worth
+      # constraining — there is no code in this repo yet, so a hook scoped
+      # to nonexistent paths (or to a lint script that isn't written) is
+      # config for a repo this isn't.
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+      - id: check-merge-conflict
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+
+  - repo: https://github.com/kynan/nbstripout
+    rev: 0.9.1
+    hooks:
+      - id: nbstripout

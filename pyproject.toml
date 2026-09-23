@@ -1,5 +1,5 @@
 [project]
-name = "cv-foundation"
+name = "wacv"
 version = "0.1.0"
 description = "WACV2027 UPAR Challenge Track 2 (Attribute-based Person Retrieval) solution"
 readme = "README.md"
@@ -8,13 +8,20 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
-    "certifi>=2026.7.22",
-    "huggingface-hub>=1.32.0",
-    "ipykernel>=7.3.0",
-    "matplotlib>=3.11.2",
-    "pillow>=12.3.0",
+    # torch/torchvision/numpy/Pillow mirror exactly what the competition's
+    # evaluation container ships (PROBLEM-DETAILS.md, Submission section) —
+    # kept in the dev environment too so nothing gets written against a
+    # convenience library the submission runtime doesn't have.
     "torch",
+    "torchvision",
+    "numpy>=2.4.0",
+    "pillow>=12.3.0",
+    # gt.csv/queries.csv/images.csv (the starter kit's annotation format)
+    # are plain image+attribute tables; pandas is the standard way to load
+    # and join them.
+    "pandas>=2.3.0",
     "tqdm>=4.70.1",
+    "ipykernel>=7.3.0",
 ]
 
 [tool.uv]
