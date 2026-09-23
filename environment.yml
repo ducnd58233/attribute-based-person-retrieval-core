@@ -1,0 +1,19 @@
+# Local development / training environment. This is intentionally NOT the
+# competition's evaluation environment (see deployments/docker/) — it is
+# newer (Python 3.13, CUDA 13.0) because training and experimentation are
+# not run inside the organizers' fixed container, only the final packaged
+# submission is. Activate this before doing anything with uv (see
+# AGENTS.md, "conda before uv").
+name: wacv
+channels:
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.13
+  - setuptools
+  - uv
+  - cudnn=9.22
+  - nvidia::cuda-toolkit=13.0
+  - conda-forge::accelerate=1.13
+  - pip

@@ -1,0 +1,25 @@
+# Local smoke test for a submission zip, before it goes to Codabench.
+#
+# Mirrors the two constraints that actually bite: no network access, and a
+# submission folder + input_data laid out the way the ingestion program
+# hands them to run.py (see PROBLEM-DETAILS.md, Submission and Data
+# sections). This is a smoke test, not a copy of the organizers' private
+# ingestion program — passing here is necessary, not sufficient.
+#
+# Usage (from the repo root, after `conda activate wacv`):
+#   docker compose -f deployments/docker/docker-compose.yml run --rm submission-test
+#
+# Point SUBMISSION_DIR / INPUT_DATA_DIR at whatever you're testing before
+# running, either via a .env file next to this one or exported in your shell.
+
+services:
+  submission-test:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile
+    network_mode: none
+    working_dir: /app
+    volumes:
+      - ${SUBMISSION_DIR:-../../build/submission}:/app:ro
+      - ${INPUT_DATA_DIR:-../../data/sample_input_data}:/app/input_data:ro
+    command: ["-c", "import run; print('run.py imports cleanly with no network access')"]
