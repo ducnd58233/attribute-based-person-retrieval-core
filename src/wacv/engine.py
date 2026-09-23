@@ -183,6 +183,43 @@ class Trainer:
         metrics["mA"] = mean_accuracy(probabilities, ranking.gallery_attrs)
         return metrics
 
+    @staticmethod
+    def _update_best(
+        current: float, best: float, higher_is_better: bool
+    ) -> tuple[float, bool]:
+        improved = current > best if higher_is_better else current < best
+        return (current, True) if improved else (best, False)
+
+    def _epoch_metrics(
+        self,
+        train_loss: float,
+        val_loss: float,
+        ranking: RankingEvalData | None,
+    ) -> tuple[dict[str, float], dict[str, str], float]:
+        metrics: dict[str, float] = {
+            "train/loss": train_loss,
+            "val/loss": val_loss,
+            "learning_rate": self.optimizer.param_groups[0]["lr"],
+        }
+        postfix: dict[str, str] = {
+            "train": f"{train_loss:.4f}",
+            "val": f"{val_loss:.4f}",
+        }
+        if ranking is None:
+            return metrics, postfix, val_loss
+
+        ranking_metrics = self._ranking_metrics(ranking)
+        for key, value in ranking_metrics.items():
+            metrics[f"val/{key}"] = value
+        postfix["mAP"] = f"{ranking_metrics['mAP']:.4f}"
+        postfix["R1"] = f"{ranking_metrics['Rank-1']:.4f}"
+        # mADM is the competition's own ranking metric; select on it rather
+        # than val_loss so best.pt tracks leaderboard quality instead of raw
+        # BCE, which decouples from ranking quality once probabilities are
+        # well-calibrated.
+        selection_metric = ranking_metrics.get("mADM", ranking_metrics["mAP"])
+        return metrics, postfix, selection_metric
+
     def fit(
         self,
         train_loader: BatchIterable,
@@ -192,7 +229,9 @@ class Trainer:
     ) -> FitResult:
         start_epoch = 0
         global_step = 0
-        best_metric = float("inf")
+        select_higher_is_better = ranking is not None
+        best_metric = float("-inf") if select_higher_is_better else float("inf")
+        epochs_without_improvement = 0
         resume_path = self.config.run.resume
         if resume_path is not None and resume_path.is_file():
             state = self.checkpoints.load(resume_path, map_location=self.device)
@@ -224,24 +263,15 @@ class Trainer:
                 global_step += step_delta
                 val_loss = self._validate_epoch(val_loader, epoch)
                 self.scheduler.step(val_loss)
-                improved = val_loss < best_metric
-                if improved:
-                    best_metric = val_loss
-                metrics: dict[str, float] = {
-                    "train/loss": train_loss,
-                    "val/loss": val_loss,
-                    "learning_rate": self.optimizer.param_groups[0]["lr"],
-                }
-                postfix: dict[str, str] = {
-                    "train": f"{train_loss:.4f}",
-                    "val": f"{val_loss:.4f}",
-                }
-                if ranking is not None:
-                    ranking_metrics = self._ranking_metrics(ranking)
-                    for key, value in ranking_metrics.items():
-                        metrics[f"val/{key}"] = value
-                    postfix["mAP"] = f"{ranking_metrics['mAP']:.4f}"
-                    postfix["R1"] = f"{ranking_metrics['Rank-1']:.4f}"
+                metrics, postfix, selection_metric = self._epoch_metrics(
+                    train_loss, val_loss, ranking
+                )
+                best_metric, improved = self._update_best(
+                    selection_metric, best_metric, select_higher_is_better
+                )
+                epochs_without_improvement = (
+                    0 if improved else epochs_without_improvement + 1
+                )
                 epoch_bar.set_postfix(ordered_dict=dict(postfix))
                 self.tracker.log_metrics(epoch, metrics)
                 self.checkpoints.save(
@@ -258,5 +288,12 @@ class Trainer:
                         best_metric=best_metric,
                     )
                 end_epoch = epoch
+
+                patience = self.config.optimization.early_stop_patience
+                if patience is not None and epochs_without_improvement >= patience:
+                    self.tracker.logger.info(
+                        "early stopping: no improvement for %d epoch(s)", patience
+                    )
+                    break
 
         return FitResult(start_epoch, end_epoch, global_step, best_metric)

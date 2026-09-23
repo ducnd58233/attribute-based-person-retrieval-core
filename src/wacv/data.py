@@ -24,6 +24,7 @@ IMAGE_TRANSFORM = transforms.Compose(
 TRAIN_TRANSFORM = transforms.Compose(
     [
         transforms.Resize((256, 128)),
+        transforms.AugMix(),
         transforms.RandomHorizontalFlip(),
         transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
         transforms.ToTensor(),
