@@ -35,7 +35,7 @@ def main() -> None:
     from src.wacv.checkpoint import load_model_weights
     from src.wacv.config import load_config
     from src.wacv.data import AttributeDataset, load_gt, load_queries
-    from src.wacv.engine import resolve_device
+    from src.wacv.engine import resolve_device, resolve_num_workers
     from src.wacv.evaluation import l1_distance, mean_accuracy, predict_probabilities
     from src.wacv.metrics import evaluate_ranking
     from src.wacv.models import build_model
@@ -57,14 +57,15 @@ def main() -> None:
         ground_truth = ground_truth.iloc[: config.data.limit]
         queries = queries[: config.data.limit]
 
+    workers = resolve_num_workers(config.data.num_workers)
     loader = DataLoader(
         AttributeDataset(
             ground_truth, config.data.root, attribute_names=attribute_names
         ),
         batch_size=config.data.batch_size,
-        num_workers=config.data.num_workers,
+        num_workers=workers,
         pin_memory=device.type == "cuda",
-        persistent_workers=config.data.num_workers > 0,
+        persistent_workers=workers > 0,
     )
     inference_model = config.model.model_copy(update={"pretrained": False})
     model = build_model(inference_model, num_attributes=len(attribute_names)).to(device)
