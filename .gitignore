@@ -260,3 +260,6 @@ $RECYCLE.BIN/
 *.lnk
 
 # End of https://www.toptal.com/developers/gitignore/api/python,cuda,windows,linux,macos
+
+# vibe-agent run/session state — local only, never shared
+/.agent-state/

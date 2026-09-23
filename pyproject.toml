@@ -25,6 +25,7 @@ dev = [
     "gdown>=5.2.0,<6",
     "pre-commit>=4.6.2",
     "pyright>=1.1.414",
+    "pytest>=8.4.0",
     "ruff>=0.16.8",
 ]
 
