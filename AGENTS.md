@@ -77,6 +77,14 @@ here.
 - **Do not add automated tests to this repository unless the user explicitly
   asks for them.** Validate implementation work with the existing checks,
   static analysis, and bounded smoke runs instead.
+- **No lint / type suppresses (MUST):** do not add `# noqa`, `# ruff: noqa`,
+  `# type: ignore`, `# pyright: ignore`, or widen
+  `pyproject.toml` ignore / per-file-ignore lists to land a change. Fix the
+  code (or the typed API) so the existing rules pass.
+- **No unrequested code (MUST):** only add files and logic the current task
+  acceptance criteria require. Prefer a script under `scripts/` over new
+  packages, fixtures, or README sections. Delete scaffolding that is not
+  needed for train / evaluate / package / submit.
 
 </always_on>
 
