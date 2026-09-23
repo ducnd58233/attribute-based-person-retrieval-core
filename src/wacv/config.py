@@ -68,6 +68,7 @@ class OptimizationConfig(StrictConfig):
     scheduler_factor: float = Field(default=0.1, gt=0.0, lt=1.0)
     scheduler_patience: NonNegativeInt = 3
     label_smoothing: float = Field(default=0.0, ge=0.0, lt=0.5)
+    early_stop_patience: PositiveInt | None = None
 
 
 class RunConfig(StrictConfig):
