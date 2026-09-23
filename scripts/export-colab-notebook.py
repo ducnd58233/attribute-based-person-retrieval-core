@@ -4,9 +4,9 @@ Source of truth is the pipeline scripts and the ``src.wacv`` modules they
 import. This exporter AST-walks those imports, emits ``%%writefile`` cells for
 collected ``src/wacv`` modules and the chosen experiment YAML, then inlines
 each stage script as a code cell (body + ``main()``, not ``runpy``). After
-train and eval it inlines ``scripts/visualize.py`` (first-N label vs
-prediction). A final persist cell offers Colab ``files.download`` / Drive
-notes. The notebook is an on-demand artifact (not committed).
+eval it inlines ``scripts/visualize.py`` once (val split, label vs prediction).
+A final persist cell offers Colab ``files.download`` / Drive notes. The
+notebook is an on-demand artifact (not committed).
 
 Usage:
   uv run python scripts/export-colab-notebook.py \\
@@ -309,10 +309,10 @@ def persist_checkpoints_cell() -> Cell:
     )
 
 
-def visualize_stage(config_rel: str, *, split: str, limit: int = 10) -> Stage:
-    """Build an inlined visualize stage for a task1 split."""
+def visualize_stage(config_rel: str, *, split: str = "val", limit: int = 4) -> Stage:
+    """Build an inlined visualize stage (default: val, post-eval)."""
     return Stage(
-        f"## Visualize (after {'train' if split == 'train' else 'eval'})",
+        "## Visualize (after eval)",
         Path("scripts/visualize.py"),
         (
             "--config",
@@ -326,12 +326,13 @@ def visualize_stage(config_rel: str, *, split: str, limit: int = 10) -> Stage:
 
 
 def device_cells() -> list[Cell]:
-    """`## Device` section: resolve CUDA-if-available once, shared by every stage."""
+    """`## Device` section: resolve CUDA → TPU → CPU once for every stage."""
     return [
         Cell(kind="markdown", source="## Device"),
         Cell(
             kind="code",
             source=(
+                "# TPU only: %pip install torch_xla  # match this runtime\n"
                 "from src.wacv.engine import resolve_device\n"
                 "\n"
                 "DEVICE = resolve_device('auto')\n"
@@ -375,12 +376,9 @@ def submission_template_cells(
 
 def build_cells(root: Path, *, config_rel: str) -> list[Cell]:
     stages = stages_for_config(config_rel)
-    visualize_stages = (
-        visualize_stage(config_rel, split="train", limit=10),
-        visualize_stage(config_rel, split="val", limit=10),
-    )
+    visualize = visualize_stage(config_rel, split="val", limit=4)
     scripts = [resolve_path(stage.script) for stage in stages]
-    scripts.extend(resolve_path(stage.script) for stage in visualize_stages)
+    scripts.append(resolve_path(visualize.script))
     for script in scripts:
         if not script.is_file():
             raise SystemExit(f"missing pipeline script: {script}")
@@ -429,7 +427,8 @@ def build_cells(root: Path, *, config_rel: str) -> list[Cell]:
                 "## Setup\n\n"
                 "Write collected `src/wacv` modules and the experiment YAML, "
                 "then run each inlined stage. Device uses "
-                "`resolve_device('auto')` (CUDA if available, else CPU)."
+                "`resolve_device('auto')` (CUDA if available, else TPU via "
+                "`torch_xla` when present, else CPU)."
             ),
         ),
         Cell(
@@ -468,26 +467,14 @@ def build_cells(root: Path, *, config_rel: str) -> list[Cell]:
         cells.append(
             inline_stage_cell(script.read_text(encoding="utf-8"), rel, stage.argv)
         )
-        if stage.section == "## Train":
-            viz = visualize_stages[0]
-            viz_script = resolve_path(viz.script)
-            cells.append(Cell(kind="markdown", source=viz.section))
-            cells.append(
-                inline_stage_cell(
-                    viz_script.read_text(encoding="utf-8"),
-                    rel_posix(viz_script, root),
-                    viz.argv,
-                )
-            )
         if stage.section == "## Eval":
-            viz = visualize_stages[1]
-            viz_script = resolve_path(viz.script)
-            cells.append(Cell(kind="markdown", source=viz.section))
+            viz_script = resolve_path(visualize.script)
+            cells.append(Cell(kind="markdown", source=visualize.section))
             cells.append(
                 inline_stage_cell(
                     viz_script.read_text(encoding="utf-8"),
                     rel_posix(viz_script, root),
-                    viz.argv,
+                    visualize.argv,
                 )
             )
 

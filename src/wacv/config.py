@@ -10,7 +10,7 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PositiveFloa
 from pydantic.types import NonNegativeInt, PositiveInt
 
 ModelName = Literal["resnet50", "convnext_tiny", "convnext_base"]
-DeviceName = Literal["auto", "cpu", "cuda"]
+DeviceName = Literal["auto", "cpu", "cuda", "tpu"]
 
 
 def _path_from_yaml(value: object) -> object:

@@ -123,33 +123,48 @@ def plot_comparisons(
     save_path: Path | None = None,
     show: bool = True,
 ) -> None:
-    """Draw a grid of images with GT / pred / error attribute lists."""
+    """Draw one readable row per sample: image + TP/FP/FN text panel."""
     count = len(comparisons)
-    columns = min(5, count)
-    rows = (count + columns - 1) // columns
-    fig, axes = plt.subplots(rows, columns, figsize=(3.2 * columns, 4.2 * rows))
-    flat = np.atleast_1d(axes).ravel()
-    for axis, sample in zip(flat, comparisons, strict=False):
-        axis.imshow(sample.rgb)
-        axis.set_title(Path(sample.image_relpath).name, fontsize=8)
-        caption = (
-            f"GT ({len(sample.label_positives)}): "
-            f"{', '.join(sample.label_positives) or '—'}\n"
-            f"Pred ({len(sample.pred_positives)}): "
-            f"{', '.join(sample.pred_positives) or '—'}\n"
-            f"FP: {', '.join(sample.false_positives) or '—'}\n"
-            f"FN: {', '.join(sample.false_negatives) or '—'}"
+    fig, axes = plt.subplots(
+        count,
+        2,
+        figsize=(11.5, max(3.2 * count, 3.2)),
+        gridspec_kw={"width_ratios": [1.0, 1.55], "wspace": 0.08},
+    )
+    rows = np.atleast_2d(axes)
+    for row_axes, sample in zip(rows, comparisons, strict=True):
+        ax_img, ax_txt = row_axes
+        ax_img.imshow(sample.rgb)
+        ax_img.set_title(Path(sample.image_relpath).name, fontsize=11)
+        ax_img.set_xticks([])
+        ax_img.set_yticks([])
+        ax_txt.axis("off")
+        gt = ", ".join(sample.label_positives) or "—"
+        pred = ", ".join(sample.pred_positives) or "—"
+        tp = ", ".join(sample.true_positives) or "—"
+        fp = ", ".join(sample.false_positives) or "—"
+        fn = ", ".join(sample.false_negatives) or "—"
+        ax_txt.text(
+            0.0,
+            1.0,
+            (
+                f"True positives ({len(sample.true_positives)}):\n  {tp}\n\n"
+                f"False positives ({len(sample.false_positives)}):\n  {fp}\n\n"
+                f"False negatives ({len(sample.false_negatives)}):\n  {fn}\n\n"
+                f"GT ({len(sample.label_positives)}):\n  {gt}\n\n"
+                f"Pred ({len(sample.pred_positives)}):\n  {pred}"
+            ),
+            transform=ax_txt.transAxes,
+            va="top",
+            ha="left",
+            fontsize=10,
+            linespacing=1.35,
         )
-        axis.set_xlabel(caption, fontsize=7)
-        axis.set_xticks([])
-        axis.set_yticks([])
-    for axis in flat[count:]:
-        axis.axis("off")
-    fig.suptitle(title)
+    fig.suptitle(title, fontsize=13, y=1.01)
     fig.tight_layout()
     if save_path is not None:
         save_path.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(save_path, dpi=120, bbox_inches="tight")
+        fig.savefig(save_path, dpi=140, bbox_inches="tight")
     if show:
         plt.show()
     else:

@@ -26,13 +26,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--split",
         choices=("train", "val"),
-        default="train",
+        default="val",
         help="task1 split whose first rows are shown",
     )
     parser.add_argument(
         "--limit",
         type=int,
-        default=10,
+        default=4,
         help="number of leading samples to score and plot",
     )
     parser.add_argument(
