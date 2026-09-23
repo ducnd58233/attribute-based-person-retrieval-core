@@ -328,9 +328,11 @@ def build_cells(root: Path, *, config_rel: str) -> list[Cell]:
         raise SystemExit("AST walk found no src.wacv modules — refusing empty collect")
 
     writefile_paths = [rel_posix(path, root) for path in src_files]
+    # Always POSIX: Windows Path.parent stringifies with backslashes, and Colab
+    # (Linux) would then mkdir a literal "src\\wacv" name instead of src/wacv.
     parents = sorted(
         {
-            str(Path(path).parent)
+            Path(path).parent.as_posix()
             for path in writefile_paths
             if Path(path).parent != Path()
         }
@@ -585,6 +587,16 @@ def validate_notebook(
         (
             "## Persist checkpoints" in text and "files.download" in code,
             "notebook missing Colab checkpoint persistence cell",
+        ),
+        (
+            "\\\\" not in code.split("%%writefile", 1)[0],
+            "setup cell must mkdir with POSIX paths (no Windows backslashes); "
+            "Colab writefile looks for src/wacv not src\\\\wacv",
+        ),
+        (
+            "src/wacv" in code.split("%%writefile", 1)[0]
+            and "mkdir(parents=True" in code.split("%%writefile", 1)[0],
+            "setup cell must mkdir src/wacv before the first writefile",
         ),
     )
     for ok, message in checks:
