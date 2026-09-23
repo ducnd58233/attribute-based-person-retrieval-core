@@ -1,51 +1,29 @@
-"""The 40 UPAR attributes, in the exact order the challenge uses.
+"""Attribute column names derived from UPAR gt.csv headers.
 
-Single source of truth: every gt.csv column, every query vector index, and
-every model output index follows this order. See the parent workspace's
-PROBLEM-DETAILS.md, section 5, for the authoritative list.
+The challenge's attribute order is the order of columns in each gt.csv after
+``image``. Do not hardcode the list — always read it from the dataset file.
 """
 
-ATTRIBUTE_NAMES: tuple[str, ...] = (
-    "Age-Young",
-    "Age-Adult",
-    "Age-Old",
-    "Gender-Female",
-    "Hair-Length-Short",
-    "Hair-Length-Long",
-    "Hair-Length-Bald",
-    "UpperBody-Length-Short",
-    "UpperBody-Color-Black",
-    "UpperBody-Color-Blue",
-    "UpperBody-Color-Brown",
-    "UpperBody-Color-Green",
-    "UpperBody-Color-Grey",
-    "UpperBody-Color-Orange",
-    "UpperBody-Color-Pink",
-    "UpperBody-Color-Purple",
-    "UpperBody-Color-Red",
-    "UpperBody-Color-White",
-    "UpperBody-Color-Yellow",
-    "UpperBody-Color-Other",
-    "LowerBody-Length-Short",
-    "LowerBody-Color-Black",
-    "LowerBody-Color-Blue",
-    "LowerBody-Color-Brown",
-    "LowerBody-Color-Green",
-    "LowerBody-Color-Grey",
-    "LowerBody-Color-Orange",
-    "LowerBody-Color-Pink",
-    "LowerBody-Color-Purple",
-    "LowerBody-Color-Red",
-    "LowerBody-Color-White",
-    "LowerBody-Color-Yellow",
-    "LowerBody-Color-Other",
-    "LowerBody-Type-Trousers&Shorts",
-    "LowerBody-Type-Skirt&Dress",
-    "Accessory-Backpack",
-    "Accessory-Bag",
-    "Accessory-Glasses-Normal",
-    "Accessory-Glasses-Sun",
-    "Accessory-Hat",
-)
+from __future__ import annotations
 
-NUM_ATTRIBUTES = len(ATTRIBUTE_NAMES)
+from pathlib import Path
+
+
+def attribute_names_from_gt(csv_path: Path) -> tuple[str, ...]:
+    """Return attribute names from a gt.csv header (everything except ``image``)."""
+    header = Path(csv_path).read_text(encoding="utf-8").splitlines()[0]
+    columns = [c.strip() for c in header.lstrip("# ").split(",")]
+    names = tuple(name for name in columns if name and name != "image")
+    if not names:
+        raise ValueError(f"no attribute columns found in {csv_path}")
+    return names
+
+
+def attribute_names_from_columns(
+    columns: list[str] | tuple[str, ...],
+) -> tuple[str, ...]:
+    """Drop the ``image`` column from an already-parsed gt header/frame columns."""
+    names = tuple(name for name in columns if name and name != "image")
+    if not names:
+        raise ValueError("no attribute columns found")
+    return names

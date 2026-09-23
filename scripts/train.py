@@ -36,8 +36,8 @@ def parse_args() -> argparse.Namespace:
 
 def build_loaders(
     config: ExperimentConfig, device: torch.device
-) -> tuple[DataLoader, DataLoader, torch.Tensor]:
-    from src.wacv.attributes import ATTRIBUTE_NAMES
+) -> tuple[DataLoader, DataLoader, torch.Tensor, int]:
+    from src.wacv.attributes import attribute_names_from_columns
     from src.wacv.data import (
         IMAGE_TRANSFORM,
         TRAIN_TRANSFORM,
@@ -48,6 +48,9 @@ def build_loaders(
     annotation_root = config.data.root / "annotations" / "task1"
     train_gt = load_gt(annotation_root / "train" / "gt.csv")
     val_gt = load_gt(annotation_root / "val" / "gt.csv")
+    attribute_names = attribute_names_from_columns(
+        tuple(str(c) for c in train_gt.columns)
+    )
     if config.data.limit is not None:
         train_gt = train_gt.iloc[: config.data.limit]
         val_gt = val_gt.iloc[: config.data.limit]
@@ -55,8 +58,12 @@ def build_loaders(
     train_transform = (
         TRAIN_TRANSFORM if config.data.train_augmentation else IMAGE_TRANSFORM
     )
-    train_dataset = AttributeDataset(train_gt, config.data.root, train_transform)
-    val_dataset = AttributeDataset(val_gt, config.data.root, IMAGE_TRANSFORM)
+    train_dataset = AttributeDataset(
+        train_gt, config.data.root, train_transform, attribute_names=attribute_names
+    )
+    val_dataset = AttributeDataset(
+        val_gt, config.data.root, IMAGE_TRANSFORM, attribute_names=attribute_names
+    )
     train_loader = DataLoader(
         train_dataset,
         batch_size=config.data.batch_size,
@@ -74,13 +81,13 @@ def build_loaders(
         persistent_workers=config.data.num_workers > 0,
     )
 
-    positive_rates = train_gt[list(ATTRIBUTE_NAMES)].astype(float).mean()
+    positive_rates = train_gt[list(attribute_names)].astype(float).mean()
     positive_rates = positive_rates.clip(lower=1e-6)
     weights = ((1.0 - positive_rates) / positive_rates).clip(
         upper=config.optimization.pos_weight_clip
     )
     pos_weight = torch.tensor(weights.to_numpy(), dtype=torch.float32)
-    return train_loader, val_loader, pos_weight
+    return train_loader, val_loader, pos_weight, len(attribute_names)
 
 
 def build_ranking_eval(
@@ -89,7 +96,7 @@ def build_ranking_eval(
     """Load Track-2 val queries/gallery for per-epoch ranking, or None if absent."""
     import numpy as np
 
-    from src.wacv.attributes import ATTRIBUTE_NAMES
+    from src.wacv.attributes import attribute_names_from_columns
     from src.wacv.data import AttributeDataset, load_gt, load_queries
     from src.wacv.engine import RankingEvalData
 
@@ -104,20 +111,25 @@ def build_ranking_eval(
         return None
 
     ground_truth = load_gt(gt_path)
+    attribute_names = attribute_names_from_columns(
+        tuple(str(c) for c in ground_truth.columns)
+    )
     queries = load_queries(queries_path)
     if config.data.limit is not None:
         ground_truth = ground_truth.iloc[: config.data.limit]
         queries = queries[: config.data.limit]
 
     loader = DataLoader(
-        AttributeDataset(ground_truth, config.data.root),
+        AttributeDataset(
+            ground_truth, config.data.root, attribute_names=attribute_names
+        ),
         batch_size=config.data.batch_size,
         shuffle=False,
         num_workers=config.data.num_workers,
         pin_memory=device.type == "cuda",
         persistent_workers=config.data.num_workers > 0,
     )
-    gallery_attrs = ground_truth[list(ATTRIBUTE_NAMES)].to_numpy(dtype=np.int64)
+    gallery_attrs = ground_truth[list(attribute_names)].to_numpy(dtype=np.int64)
     return RankingEvalData(
         queries=queries,
         gallery_attrs=gallery_attrs,
@@ -126,7 +138,6 @@ def build_ranking_eval(
 
 
 def main() -> None:
-    from src.wacv.attributes import NUM_ATTRIBUTES
     from src.wacv.config import load_config
     from src.wacv.engine import Trainer, resolve_device, seed_everything
     from src.wacv.models import build_model
@@ -135,10 +146,10 @@ def main() -> None:
     config = load_config(parse_args().config)
     seed_everything(config.run.seed)
     device = resolve_device(config.run.device)
-    train_loader, val_loader, pos_weight = build_loaders(config, device)
+    train_loader, val_loader, pos_weight, num_attributes = build_loaders(config, device)
     ranking = build_ranking_eval(config, device)
 
-    model = build_model(config.model, num_attributes=NUM_ATTRIBUTES).to(device)
+    model = build_model(config.model, num_attributes=num_attributes).to(device)
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight.to(device))
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -153,9 +164,10 @@ def main() -> None:
 
     with RunTracker(config) as tracker:
         tracker.logger.info(
-            "device=%s model=%s ranking_each_epoch=%s",
+            "device=%s model=%s num_attributes=%d ranking_each_epoch=%s",
             device,
             config.model.name,
+            num_attributes,
             ranking is not None,
         )
         result = Trainer(

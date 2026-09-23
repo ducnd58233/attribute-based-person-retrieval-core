@@ -11,7 +11,7 @@ from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
 
-from src.wacv.attributes import ATTRIBUTE_NAMES
+from src.wacv.attributes import attribute_names_from_columns
 
 IMAGE_TRANSFORM = transforms.Compose(
     [
@@ -34,14 +34,14 @@ TRAIN_TRANSFORM = transforms.Compose(
 
 
 def load_gt(csv_path: Path) -> pd.DataFrame:
-    """Load a gt.csv: one row per image, `image` plus the 40 attribute columns."""
+    """Load a gt.csv: one row per image, `image` plus the attribute columns."""
     header = Path(csv_path).read_text(encoding="utf-8").splitlines()[0]
     columns = [c.strip() for c in header.lstrip("# ").split(",")]
     return pd.read_csv(csv_path, names=columns, comment="#")
 
 
 def load_queries(csv_path: Path) -> np.ndarray:
-    """Load a queries.csv into a `(num_queries, 40)` int array."""
+    """Load a queries.csv into a `(num_queries, num_attributes)` int array."""
     return pd.read_csv(csv_path, comment="#", header=None).to_numpy(dtype=np.int64)
 
 
@@ -51,17 +51,26 @@ def load_query_ids(csv_path: Path) -> pd.DataFrame:
 
 
 class AttributeDataset(Dataset):
-    """One pedestrian image and its 40-bit attribute vector."""
+    """One pedestrian image and its attribute vector (order from gt columns)."""
 
     def __init__(
         self,
         gt: pd.DataFrame,
         images_root: Path,
         transform: transforms.Compose = IMAGE_TRANSFORM,
+        *,
+        attribute_names: tuple[str, ...] | None = None,
     ) -> None:
         self._gt = gt.reset_index(drop=True)
         self._images_root = Path(images_root)
         self._transform = transform
+        self._attribute_names = attribute_names or attribute_names_from_columns(
+            tuple(str(c) for c in self._gt.columns)
+        )
+
+    @property
+    def attribute_names(self) -> tuple[str, ...]:
+        return self._attribute_names
 
     def __len__(self) -> int:
         return len(self._gt)
@@ -72,5 +81,7 @@ class AttributeDataset(Dataset):
         transformed = self._transform(image)
         if not isinstance(transformed, torch.Tensor):
             raise TypeError("AttributeDataset transforms must return a tensor")
-        attrs = torch.from_numpy(row[list(ATTRIBUTE_NAMES)].to_numpy(dtype=np.float32))
+        attrs = torch.from_numpy(
+            row[list(self._attribute_names)].to_numpy(dtype=np.float32)
+        )
         return transformed, attrs

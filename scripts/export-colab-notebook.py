@@ -1,9 +1,12 @@
 """Generate a Colab/Kaggle notebook by collecting scripts/ + src/wacv.
 
-Source of truth is the four pipeline scripts and the ``src.wacv`` modules they
+Source of truth is the pipeline scripts and the ``src.wacv`` modules they
 import. This exporter AST-walks those imports, emits ``%%writefile`` cells for
-every collected path, then stage cells that ``runpy`` each script. The notebook
-is an on-demand artifact (not committed). There is no ``train_pipeline.py``.
+collected ``src/wacv`` modules, then inlines each stage script as a code cell
+(body + ``main()``, not ``runpy``). After train and eval it inlines
+``scripts/visualize.py`` (first-N label vs prediction). A final persist cell
+offers Colab ``files.download`` / Drive notes. The notebook is an on-demand
+artifact (not committed). There is no ``train_pipeline.py``.
 
 Usage:
   uv run python scripts/export-colab-notebook.py \\
@@ -232,20 +235,90 @@ def writefile_cell(relpath: str, content: str) -> Cell:
     return Cell(kind="code", source=f"%%writefile {relpath}\n{body}")
 
 
-def run_stage_cell(relpath: str, argv: Sequence[str]) -> Cell:
+MAIN_GUARD_RE: Final[re.Pattern[str]] = re.compile(
+    r"\nif\s+__name__\s*==\s*[\"']__main__[\"']\s*:\s*\n(?:\s+main\(\)\s*\n?)+\s*$",
+)
+
+FORBIDDEN_RUNPY: Final[re.Pattern[str]] = re.compile(r"runpy\.run_path\s*\(")
+
+
+def inline_stage_cell(script_text: str, argv0: str, argv: Sequence[str]) -> Cell:
+    """Convert a pipeline script into a notebook cell (body + main())."""
+    body = MAIN_GUARD_RE.sub("\n", script_text.rstrip() + "\n")
     argv_list = list(argv)
-    source = (
-        "import runpy\n"
+    footer = (
+        "\n# --- notebook entry (converted from script; not runpy) ---\n"
         "import sys\n"
-        f"sys.argv = [{relpath!r}] + {argv_list!r}\n"
-        f"runpy.run_path({relpath!r}, run_name='__main__')\n"
+        f"sys.argv = [{argv0!r}] + {argv_list!r}\n"
+        "main()\n"
     )
-    return Cell(kind="code", source=source)
+    return Cell(kind="code", source=body + footer)
+
+
+def persist_checkpoints_cell() -> Cell:
+    return Cell(
+        kind="code",
+        source=(
+            "# Colab VM disk is ephemeral - download or copy to Drive.\n"
+            "from pathlib import Path\n"
+            "\n"
+            "candidates = [\n"
+            "    Path('runs/convnext-baseline/checkpoints/best.pt'),\n"
+            "    Path('runs/convnext-baseline/checkpoints/last.pt'),\n"
+            "    Path('build/submission'),\n"
+            "]\n"
+            "existing = [p for p in candidates if p.exists()]\n"
+            "print('Found:', existing)\n"
+            "\n"
+            "try:\n"
+            "    from google.colab import files  # type: ignore[import-not-found]\n"
+            "\n"
+            "    for path in existing:\n"
+            "        if path.is_file():\n"
+            "            print('Downloading', path)\n"
+            "            files.download(str(path))\n"
+            "        else:\n"
+            "            print('Skip directory (zip it first if needed):', path)\n"
+            "except ImportError:\n"
+            "    print('Not Colab; files remain on local disk at the paths above.')\n"
+            "\n"
+            "# Optional persistence on Drive (better for multi-GB checkpoints):\n"
+            "# from google.colab import drive\n"
+            "# drive.mount('/content/drive')\n"
+            "# dest = Path('/content/drive/MyDrive/wacv-upar-checkpoints')\n"
+            "# dest.mkdir(parents=True, exist_ok=True)\n"
+            "# for path in existing:\n"
+            "#     if path.is_file():\n"
+            "#         shutil.copy2(path, dest / path.name)\n"
+            "# drive.flush_and_unmount()\n"
+        ),
+    )
+
+
+def visualize_stage(config_rel: str, *, split: str, limit: int = 10) -> Stage:
+    """Build an inlined visualize stage for a task1 split."""
+    return Stage(
+        f"## Visualize (after {'train' if split == 'train' else 'eval'})",
+        Path("scripts/visualize.py"),
+        (
+            "--config",
+            config_rel,
+            "--split",
+            split,
+            "--limit",
+            str(limit),
+        ),
+    )
 
 
 def build_cells(root: Path, *, config_rel: str) -> list[Cell]:
     stages = stages_for_config(config_rel)
+    visualize_stages = (
+        visualize_stage(config_rel, split="train", limit=10),
+        visualize_stage(config_rel, split="val", limit=10),
+    )
     scripts = [resolve_path(stage.script) for stage in stages]
+    scripts.extend(resolve_path(stage.script) for stage in visualize_stages)
     for script in scripts:
         if not script.is_file():
             raise SystemExit(f"missing pipeline script: {script}")
@@ -253,6 +326,16 @@ def build_cells(root: Path, *, config_rel: str) -> list[Cell]:
     src_files = collect_src_files(scripts, root)
     if not src_files:
         raise SystemExit("AST walk found no src.wacv modules — refusing empty collect")
+
+    writefile_paths = [rel_posix(path, root) for path in src_files]
+    parents = sorted(
+        {
+            str(Path(path).parent)
+            for path in writefile_paths
+            if Path(path).parent != Path()
+        }
+    )
+    parents_literal = repr(parents)
 
     cells: list[Cell] = [
         Cell(
@@ -262,14 +345,15 @@ def build_cells(root: Path, *, config_rel: str) -> list[Cell]:
                 "Generated by `scripts/export-colab-notebook.py` from "
                 "`scripts/` + collected `src/wacv` modules "
                 f"(config=`{config_rel}`). "
-                "Do not hand-edit; regenerate the notebook instead."
+                "Stage cells are inlined script conversions (not runpy)."
             ),
         ),
         Cell(
             kind="markdown",
             source=(
                 "## Setup\n\n"
-                "Write collected library modules, then run each stage script."
+                "Create parent directories, write collected `src/wacv` modules, "
+                "then run each inlined stage."
             ),
         ),
         Cell(
@@ -280,6 +364,8 @@ def build_cells(root: Path, *, config_rel: str) -> list[Cell]:
                 "ROOT = Path.cwd()\n"
                 "if str(ROOT) not in sys.path:\n"
                 "    sys.path.insert(0, str(ROOT))\n"
+                f"for parent in {parents_literal}:\n"
+                "    Path(parent).mkdir(parents=True, exist_ok=True)\n"
                 "print('ROOT', ROOT)\n"
             ),
         ),
@@ -298,9 +384,34 @@ def build_cells(root: Path, *, config_rel: str) -> list[Cell]:
         script = resolve_path(stage.script)
         rel = rel_posix(script, root)
         cells.append(Cell(kind="markdown", source=stage.section))
-        cells.append(writefile_cell(rel, script.read_text(encoding="utf-8")))
-        cells.append(run_stage_cell(rel, stage.argv))
+        cells.append(
+            inline_stage_cell(script.read_text(encoding="utf-8"), rel, stage.argv)
+        )
+        if stage.section == "## Train":
+            viz = visualize_stages[0]
+            viz_script = resolve_path(viz.script)
+            cells.append(Cell(kind="markdown", source=viz.section))
+            cells.append(
+                inline_stage_cell(
+                    viz_script.read_text(encoding="utf-8"),
+                    rel_posix(viz_script, root),
+                    viz.argv,
+                )
+            )
+        if stage.section == "## Eval":
+            viz = visualize_stages[1]
+            viz_script = resolve_path(viz.script)
+            cells.append(Cell(kind="markdown", source=viz.section))
+            cells.append(
+                inline_stage_cell(
+                    viz_script.read_text(encoding="utf-8"),
+                    rel_posix(viz_script, root),
+                    viz.argv,
+                )
+            )
 
+    cells.append(Cell(kind="markdown", source="## Persist checkpoints"))
+    cells.append(persist_checkpoints_cell())
     return cells
 
 
@@ -392,53 +503,92 @@ def config_relpath(config: Path, root: Path) -> str:
         return resolved.as_posix()
 
 
+def _require(condition: bool, message: str) -> None:
+    if not condition:
+        raise SystemExit(message)
+
+
 def validate_notebook(
     path: Path, *, root: Path = ROOT, config_rel: str = DEFAULT_CONFIG.as_posix()
 ) -> None:
-    if LEGACY_PIPELINE_PY.is_file():
-        raise SystemExit(
-            f"legacy duplicate still present: {LEGACY_PIPELINE_PY} "
-            "(delete it; notebook is generated from scripts/ + src/)"
-        )
-    if LEGACY_EXPORTER.is_file():
-        raise SystemExit(
-            f"legacy exporter still present: {LEGACY_EXPORTER} "
-            "(use scripts/export-colab-notebook.py)"
-        )
+    _require(
+        not LEGACY_PIPELINE_PY.is_file(),
+        f"legacy duplicate still present: {LEGACY_PIPELINE_PY} "
+        "(delete it; notebook is generated from scripts/ + src/)",
+    )
+    _require(
+        not LEGACY_EXPORTER.is_file(),
+        f"legacy exporter still present: {LEGACY_EXPORTER} "
+        "(use scripts/export-colab-notebook.py)",
+    )
     notebook = json.loads(path.read_text(encoding="utf-8"))
-    if notebook.get("nbformat") != NBFORMAT_MAJOR:
-        raise SystemExit(
-            f"expected nbformat {NBFORMAT_MAJOR}, got {notebook.get('nbformat')}"
-        )
+    _require(
+        notebook.get("nbformat") == NBFORMAT_MAJOR,
+        f"expected nbformat {NBFORMAT_MAJOR}, got {notebook.get('nbformat')}",
+    )
     cells = notebook.get("cells")
-    if not isinstance(cells, list) or not cells:
-        raise SystemExit("notebook has no cells")
+    _require(
+        isinstance(cells, list) and bool(cells),
+        "notebook has no cells",
+    )
     text = notebook_text(notebook)
     code = notebook_code_text(notebook)
     missing_sections = [section for section in REQUIRED_SECTIONS if section not in text]
-    if missing_sections:
-        raise SystemExit(f"missing markdown sections: {missing_sections}")
-    if REQUIRED_FROM_TRAIN not in code:
-        raise SystemExit(
-            f"notebook missing collected train.py marker: {REQUIRED_FROM_TRAIN}"
-        )
-    if REQUIRED_FROM_SRC not in code:
-        raise SystemExit(
-            f"notebook missing collected src/wacv marker: {REQUIRED_FROM_SRC}"
-        )
-    if "smoke.yml" in code:
-        raise SystemExit("pipeline notebook must not reference smoke.yml")
-    if config_rel not in code:
-        raise SystemExit(f"pipeline notebook must reference --config {config_rel}")
-    if FORBIDDEN_SUBPROCESS.search(code):
-        raise SystemExit(
+    _require(not missing_sections, f"missing markdown sections: {missing_sections}")
+    checks: tuple[tuple[bool, str], ...] = (
+        (
+            REQUIRED_FROM_TRAIN in code,
+            f"notebook missing collected train.py marker: {REQUIRED_FROM_TRAIN}",
+        ),
+        (
+            REQUIRED_FROM_SRC in code,
+            f"notebook missing collected src/wacv marker: {REQUIRED_FROM_SRC}",
+        ),
+        ("smoke.yml" not in code, "pipeline notebook must not reference smoke.yml"),
+        (
+            config_rel in code,
+            f"pipeline notebook must reference --config {config_rel}",
+        ),
+        (
+            FORBIDDEN_SUBPROCESS.search(code) is None,
             "notebook still shells out to pipeline scripts via subprocess "
-            "(use collected writefile + runpy instead)"
-        )
-    if "%%writefile scripts/train.py" not in code:
-        raise SystemExit("notebook missing writefile for scripts/train.py")
-    if "%%writefile src/wacv/engine.py" not in code:
-        raise SystemExit("notebook missing writefile for src/wacv/engine.py")
+            "(use collected writefile + inlined stage cells instead)",
+        ),
+        (
+            FORBIDDEN_RUNPY.search(code) is None,
+            "notebook still uses runpy.run_path "
+            "(inline stage scripts with body + main() instead)",
+        ),
+        (
+            "%%writefile scripts/train.py" not in code,
+            "notebook must not writefile pipeline scripts "
+            "(inline train/evaluate/package/download cells)",
+        ),
+        (
+            "%%writefile src/wacv/engine.py" in code,
+            "notebook missing writefile for src/wacv/engine.py",
+        ),
+        (
+            "def build_loaders(" in code and "sys.argv =" in code,
+            "notebook missing inlined train stage (build_loaders + argv)",
+        ),
+        (
+            "## Visualize (after train)" in text
+            and "## Visualize (after eval)" in text,
+            "notebook missing post-train/eval visualize sections",
+        ),
+        (
+            "scripts/visualize.py" in code and "collect_comparisons" in code,
+            "notebook missing inlined scripts/visualize.py "
+            "(label vs prediction on first-N samples)",
+        ),
+        (
+            "## Persist checkpoints" in text and "files.download" in code,
+            "notebook missing Colab checkpoint persistence cell",
+        ),
+    )
+    for ok, message in checks:
+        _require(ok, message)
     print(f"check ok: {path} ({len(cells)} cells, root={root})")
 
 

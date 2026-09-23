@@ -48,15 +48,17 @@ def parse_args() -> argparse.Namespace:
 def _export_weights(
     checkpoint: Path, config_path: Path, destination: Path
 ) -> dict[str, Any]:
-    from src.wacv.attributes import NUM_ATTRIBUTES
+    from src.wacv.attributes import attribute_names_from_gt
     from src.wacv.checkpoint import load_model_weights
     from src.wacv.config import load_config
     from src.wacv.models import build_model
 
     config = load_config(config_path)
+    gt_path = config.data.root / "annotations" / "task1" / "train" / "gt.csv"
+    num_attributes = len(attribute_names_from_gt(gt_path))
     model = build_model(
         config.model.model_copy(update={"pretrained": False}),
-        num_attributes=NUM_ATTRIBUTES,
+        num_attributes=num_attributes,
     )
     load_model_weights(checkpoint.resolve(), model, map_location=torch.device("cpu"))
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -64,7 +66,7 @@ def _export_weights(
     return {
         "name": config.model.name,
         "dropout": config.model.dropout,
-        "num_attributes": NUM_ATTRIBUTES,
+        "num_attributes": num_attributes,
         "source_checkpoint": str(checkpoint),
     }
 
