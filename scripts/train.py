@@ -151,14 +151,17 @@ def main() -> None:
     device = resolve_device(config.run.device)
     full_run = config.data.limit is None and config.optimization.epochs > 2
     if device.type == "cpu" and full_run:
-        raise SystemExit(
+        LOGGER.warning(
             "Training resolved to CPU for a full-length run "
-            f"(model={config.model.name}, epochs={config.optimization.epochs}). "
-            "ConvNeXt on CPU will appear stuck at epochs 0% for a very long time. "
+            "(model=%s, epochs=%d, cuda_available=%s). "
+            "ConvNeXt on CPU is very slow and can look stuck at epochs 0%%. "
             "On Colab: Runtime → Change runtime type → GPU (T4), then "
             "Runtime → Restart session, and re-run from Setup. "
-            "For a short CPU sanity check, set data.limit and a small "
-            "optimization.epochs in the experiment YAML."
+            "Continuing on CPU because run.device resolves GPU-or-CPU via "
+            "resolve_device.",
+            config.model.name,
+            config.optimization.epochs,
+            torch.cuda.is_available(),
         )
     train_loader, val_loader, pos_weight, num_attributes = build_loaders(config, device)
     ranking = build_ranking_eval(config, device)
@@ -178,8 +181,10 @@ def main() -> None:
 
     with RunTracker(config) as tracker:
         tracker.logger.info(
-            "device=%s model=%s num_attributes=%d ranking_each_epoch=%s",
+            "device=%s cuda_available=%s model=%s num_attributes=%d "
+            "ranking_each_epoch=%s",
             device,
+            torch.cuda.is_available(),
             config.model.name,
             num_attributes,
             ranking is not None,

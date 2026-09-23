@@ -43,6 +43,12 @@ class RankingEvalData:
 
 
 def resolve_device(requested: DeviceName) -> torch.device:
+    """Pick a torch device: ``auto`` uses CUDA when available, else CPU.
+
+    Notebooks and CLIs should call this instead of hard-coding ``cuda`` or
+    ``cpu``. Passing ``cuda`` when no GPU is present raises; ``auto`` never
+    does.
+    """
     if requested == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if requested == "cuda" and not torch.cuda.is_available():

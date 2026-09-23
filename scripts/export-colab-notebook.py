@@ -72,6 +72,7 @@ def stages_for_config(config_rel: str) -> tuple[Stage, ...]:
 
 
 REQUIRED_SECTIONS: Final[tuple[str, ...]] = (
+    "## Device",
     "## Download",
     "## Train",
     "## Eval",
@@ -396,12 +397,12 @@ def build_cells(root: Path, *, config_rel: str) -> list[Cell]:
                 "## Setup\n\n"
                 "Create parent directories, write collected `src/wacv` modules "
                 "and the experiment YAML, then run each inlined stage.\n\n"
-                "**GPU required for full baseline train.** On Colab: "
-                "Runtime → Change runtime type → GPU (T4), then "
-                "Runtime → Restart session, and re-run from Setup. "
-                "CPU + ConvNeXt + 30 epochs appears stuck at `epochs 0%` "
-                "for a very long time; `scripts/train.py` now exits early "
-                "on that case. Notebook config uses `num_workers: 0`."
+                "Device selection uses `src.wacv.engine.resolve_device`: "
+                "CUDA when `torch.cuda.is_available()`, otherwise CPU "
+                "(`run.device: auto` in the YAML). For full ConvNeXt training "
+                "on Colab, enable a GPU: Runtime → Change runtime type → "
+                "GPU (T4), then Runtime → Restart session and re-run from "
+                "Setup. Notebook config uses `num_workers: 0`."
             ),
         ),
         Cell(
@@ -433,6 +434,27 @@ def build_cells(root: Path, *, config_rel: str) -> list[Cell]:
         writefile_cell(
             config_rel,
             notebook_config_yaml(config_path.read_text(encoding="utf-8")),
+        )
+    )
+
+    cells.append(Cell(kind="markdown", source="## Device"))
+    cells.append(
+        Cell(
+            kind="code",
+            source=(
+                "import torch\n"
+                "from src.wacv.engine import resolve_device\n"
+                "\n"
+                "DEVICE = resolve_device('auto')\n"
+                "print('cuda_available', torch.cuda.is_available())\n"
+                "print('device', DEVICE)\n"
+                "if DEVICE.type == 'cpu':\n"
+                "    print(\n"
+                "        'No GPU detected — train/eval will use CPU via '\n"
+                "        'resolve_device(auto). Enable a Colab GPU for '\n"
+                "        'full ConvNeXt runs.'\n"
+                "    )\n"
+            ),
         )
     )
 
@@ -695,13 +717,16 @@ def validate_notebook(
             "notebook must ship resolve_num_workers (engine + train/evaluate)",
         ),
         (
-            "Training resolved to CPU for a full-length run" in stage_code,
-            "inlined train must fail-fast when device resolves to CPU "
-            "for a full baseline run",
+            "resolve_device" in code and "cuda.is_available" in code,
+            "notebook must probe device via resolve_device + cuda.is_available",
+        ),
+        (
+            "## Device" in text and "DEVICE = resolve_device" in code,
+            "notebook missing ## Device cell that sets DEVICE via resolve_device",
         ),
         (
             "Change runtime type" in text and "GPU" in text,
-            "setup markdown must tell the user to enable a Colab GPU",
+            "setup markdown must tell the user how to enable a Colab GPU",
         ),
     )
     for ok, message in checks:
