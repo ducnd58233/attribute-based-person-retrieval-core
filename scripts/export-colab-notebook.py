@@ -241,10 +241,21 @@ MAIN_GUARD_RE: Final[re.Pattern[str]] = re.compile(
 
 FORBIDDEN_RUNPY: Final[re.Pattern[str]] = re.compile(r"runpy\.run_path\s*\(")
 
+# Scripts use Path(__file__).parents[1]; notebooks have no __file__.
+FILE_ROOT_RE: Final[re.Pattern[str]] = re.compile(
+    r"ROOT\s*=\s*Path\(__file__\)\.resolve\(\)\.parents\[1\]"
+)
+
 
 def inline_stage_cell(script_text: str, argv0: str, argv: Sequence[str]) -> Cell:
     """Convert a pipeline script into a notebook cell (body + main())."""
     body = MAIN_GUARD_RE.sub("\n", script_text.rstrip() + "\n")
+    body, root_subs = FILE_ROOT_RE.subn("ROOT = Path.cwd()", body)
+    if root_subs == 0 and "Path(__file__)" in body:
+        raise SystemExit(
+            "inlined stage still references Path(__file__) after ROOT rewrite; "
+            "extend FILE_ROOT_RE for this script pattern"
+        )
     argv_list = list(argv)
     footer = (
         "\n# --- notebook entry (converted from script; not runpy) ---\n"
@@ -495,6 +506,22 @@ def notebook_code_text(notebook: dict[str, object]) -> str:
     return "".join(chunks)
 
 
+def notebook_stage_code_text(notebook: dict[str, object]) -> str:
+    """Code from cells that are not ``%%writefile`` (inlined stages / setup)."""
+    chunks: list[str] = []
+    raw_cells = notebook.get("cells")
+    if not isinstance(raw_cells, list):
+        return ""
+    for cell in raw_cells:
+        if not isinstance(cell, dict) or cell.get("cell_type") != "code":
+            continue
+        source = _flatten_source(cell.get("source", []))
+        if source.lstrip().startswith("%%writefile"):
+            continue
+        chunks.append(source)
+    return "".join(chunks)
+
+
 def config_relpath(config: Path, root: Path) -> str:
     resolved = resolve_path(config)
     if not resolved.is_file():
@@ -535,6 +562,7 @@ def validate_notebook(
     )
     text = notebook_text(notebook)
     code = notebook_code_text(notebook)
+    stage_code = notebook_stage_code_text(notebook)
     missing_sections = [section for section in REQUIRED_SECTIONS if section not in text]
     _require(not missing_sections, f"missing markdown sections: {missing_sections}")
     checks: tuple[tuple[bool, str], ...] = (
@@ -597,6 +625,14 @@ def validate_notebook(
             "src/wacv" in code.split("%%writefile", 1)[0]
             and "mkdir(parents=True" in code.split("%%writefile", 1)[0],
             "setup cell must mkdir src/wacv before the first writefile",
+        ),
+        (
+            "ROOT = Path.cwd()" in stage_code,
+            "inlined stages must set ROOT = Path.cwd() (notebooks have no __file__)",
+        ),
+        (
+            "Path(__file__)" not in stage_code,
+            "inlined stage cells must not reference Path(__file__); use Path.cwd()",
         ),
     )
     for ok, message in checks:
