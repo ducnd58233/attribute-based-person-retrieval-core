@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -14,10 +15,13 @@ from torch.utils.data import DataLoader
 
 if TYPE_CHECKING:
     from src.wacv.config import ExperimentConfig
+    from src.wacv.engine import RankingEvalData
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+LOGGER = logging.getLogger(__name__)
 
 
 def parse_args() -> argparse.Namespace:
@@ -79,6 +83,48 @@ def build_loaders(
     return train_loader, val_loader, pos_weight
 
 
+def build_ranking_eval(
+    config: ExperimentConfig, device: torch.device
+) -> RankingEvalData | None:
+    """Load Track-2 val queries/gallery for per-epoch ranking, or None if absent."""
+    import numpy as np
+
+    from src.wacv.attributes import ATTRIBUTE_NAMES
+    from src.wacv.data import AttributeDataset, load_gt, load_queries
+    from src.wacv.engine import RankingEvalData
+
+    val_root = config.data.root / "annotations" / "task2" / "val"
+    gt_path = val_root / "gt.csv"
+    queries_path = val_root / "queries.csv"
+    if not gt_path.is_file() or not queries_path.is_file():
+        LOGGER.warning(
+            "Track-2 val annotations missing under %s; skipping per-epoch ranking",
+            val_root,
+        )
+        return None
+
+    ground_truth = load_gt(gt_path)
+    queries = load_queries(queries_path)
+    if config.data.limit is not None:
+        ground_truth = ground_truth.iloc[: config.data.limit]
+        queries = queries[: config.data.limit]
+
+    loader = DataLoader(
+        AttributeDataset(ground_truth, config.data.root),
+        batch_size=config.data.batch_size,
+        shuffle=False,
+        num_workers=config.data.num_workers,
+        pin_memory=device.type == "cuda",
+        persistent_workers=config.data.num_workers > 0,
+    )
+    gallery_attrs = ground_truth[list(ATTRIBUTE_NAMES)].to_numpy(dtype=np.int64)
+    return RankingEvalData(
+        queries=queries,
+        gallery_attrs=gallery_attrs,
+        gallery_loader=loader,
+    )
+
+
 def main() -> None:
     from src.wacv.attributes import NUM_ATTRIBUTES
     from src.wacv.config import load_config
@@ -90,6 +136,7 @@ def main() -> None:
     seed_everything(config.run.seed)
     device = resolve_device(config.run.device)
     train_loader, val_loader, pos_weight = build_loaders(config, device)
+    ranking = build_ranking_eval(config, device)
 
     model = build_model(config.model, num_attributes=NUM_ATTRIBUTES).to(device)
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight.to(device))
@@ -105,10 +152,15 @@ def main() -> None:
     )
 
     with RunTracker(config) as tracker:
-        tracker.logger.info("device=%s model=%s", device, config.model.name)
+        tracker.logger.info(
+            "device=%s model=%s ranking_each_epoch=%s",
+            device,
+            config.model.name,
+            ranking is not None,
+        )
         result = Trainer(
             model, optimizer, scheduler, criterion, device, tracker, config
-        ).fit(train_loader, val_loader)
+        ).fit(train_loader, val_loader, ranking=ranking)
         tracker.logger.info(
             "finished start_epoch=%d end_epoch=%d global_step=%d best_val_loss=%.6f",
             result.start_epoch,
