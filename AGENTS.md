@@ -11,7 +11,10 @@ for the approach before writing any model code here.
 This repo holds training code, inference code, and the environment/tooling
 needed to build a Codabench submission. It does **not** hold competition
 rules or research notes — those live in the parent workspace and are not
-duplicated here; link to them instead.
+duplicated here; link to them instead. Concretely: **no documentation files
+beyond this `AGENTS.md`, `CLAUDE.md`, and a minimal `README.md`** — no
+design docs, no ADRs, no `docs/` folder here. Write those in the parent
+workspace instead.
 
 Two environments exist here, deliberately different:
 
