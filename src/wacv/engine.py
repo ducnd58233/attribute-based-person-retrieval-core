@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import random
-import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -43,11 +42,9 @@ class RankingEvalData:
 
 
 def resolve_device(requested: DeviceName) -> torch.device:
-    """Pick a torch device: ``auto`` uses CUDA when available, else CPU.
+    """Return CUDA when available for ``auto``, else CPU.
 
-    Notebooks and CLIs should call this instead of hard-coding ``cuda`` or
-    ``cpu``. Passing ``cuda`` when no GPU is present raises; ``auto`` never
-    does.
+    Notebooks and CLIs share this helper. ``cuda`` raises if no GPU exists.
     """
     if requested == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -57,22 +54,11 @@ def resolve_device(requested: DeviceName) -> torch.device:
 
 
 def resolve_num_workers(requested: int) -> int:
-    """Cap DataLoader workers to what the host can actually run.
-
-    Colab and small VMs often advertise fewer usable CPUs than
-    ``config.data.num_workers`` (default 4). Excess workers hang the first
-    epoch at 0% instead of training. Notebooks should prefer ``0``.
-    """
+    """Cap DataLoader workers to ``cpu_count - 1`` (or 0 when requested ≤ 0)."""
     if requested <= 0:
         return 0
     cpu_count = os.cpu_count() or 1
-    capped = min(requested, max(cpu_count - 1, 0))
-    in_colab = "google.colab" in sys.modules or bool(
-        os.environ.get("COLAB_RELEASE_TAG")
-    )
-    if in_colab:
-        return min(capped, 2)
-    return capped
+    return min(requested, max(cpu_count - 1, 0))
 
 
 def seed_everything(seed: int) -> None:

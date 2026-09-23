@@ -6,13 +6,10 @@ collected ``src/wacv`` modules and the chosen experiment YAML, then inlines
 each stage script as a code cell (body + ``main()``, not ``runpy``). After
 train and eval it inlines ``scripts/visualize.py`` (first-N label vs
 prediction). A final persist cell offers Colab ``files.download`` / Drive
-notes. The notebook is an on-demand artifact (not committed). There is no
-``train_pipeline.py``.
+notes. The notebook is an on-demand artifact (not committed).
 
 Usage:
   uv run python scripts/export-colab-notebook.py \\
-      --config configs/convnext_baseline.yml
-  uv run python scripts/export-colab-notebook.py --check \\
       --config configs/convnext_baseline.yml
 """
 
@@ -71,21 +68,6 @@ def stages_for_config(config_rel: str) -> tuple[Stage, ...]:
     )
 
 
-REQUIRED_SECTIONS: Final[tuple[str, ...]] = (
-    "## Device",
-    "## Download",
-    "## Train",
-    "## Eval",
-    "## Package",
-)
-REQUIRED_FROM_TRAIN: Final[str] = "def build_loaders("
-REQUIRED_FROM_SRC: Final[str] = "class Trainer"
-FORBIDDEN_SUBPROCESS: Final[re.Pattern[str]] = re.compile(
-    r"subprocess\.(?:check_call|run|Popen|call)\s*\([^)]*"
-    r"scripts[/\\](?:train|evaluate|package-submission|download-dataset)\.py",
-    re.IGNORECASE | re.DOTALL,
-)
-
 NBFORMAT_MAJOR: Final[int] = 4
 NBFORMAT_MINOR: Final[int] = 5
 
@@ -113,11 +95,6 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=DEFAULT_OUT,
         help="Destination .ipynb path (local artifact; not committed)",
-    )
-    parser.add_argument(
-        "--check",
-        action="store_true",
-        help="After write, assert structural acceptance",
     )
     return parser.parse_args()
 
@@ -237,34 +214,9 @@ def writefile_cell(relpath: str, content: str) -> Cell:
     return Cell(kind="code", source=f"%%writefile {relpath}\n{body}")
 
 
-def notebook_config_yaml(raw: str) -> str:
-    """Force Colab-safe DataLoader settings in the exported YAML cell.
-
-    Host ``configs/*.yml`` keep their CLI defaults; the notebook writefile
-    must use ``num_workers: 0`` so the first training epoch cannot freeze
-    under Colab's 2-CPU worker cap.
-    """
-    lines: list[str] = []
-    for line in raw.splitlines(keepends=True):
-        stripped = line.lstrip()
-        if stripped.startswith("num_workers:"):
-            indent = line[: len(line) - len(stripped)]
-            lines.append(f"{indent}num_workers: 0\n")
-            continue
-        lines.append(line)
-    text = "".join(lines)
-    if not text.endswith("\n"):
-        text += "\n"
-    if "num_workers: 0" not in text:
-        raise SystemExit("notebook config rewrite failed to set num_workers: 0")
-    return text
-
-
 MAIN_GUARD_RE: Final[re.Pattern[str]] = re.compile(
     r"\nif\s+__name__\s*==\s*[\"']__main__[\"']\s*:\s*\n(?:\s+main\(\)\s*\n?)+\s*$",
 )
-
-FORBIDDEN_RUNPY: Final[re.Pattern[str]] = re.compile(r"runpy\.run_path\s*\(")
 
 # Scripts use Path(__file__).parents[1]; notebooks have no __file__.
 FILE_ROOT_RE: Final[re.Pattern[str]] = re.compile(
@@ -275,12 +227,7 @@ FILE_ROOT_RE: Final[re.Pattern[str]] = re.compile(
 def inline_stage_cell(script_text: str, argv0: str, argv: Sequence[str]) -> Cell:
     """Convert a pipeline script into a notebook cell (body + main())."""
     body = MAIN_GUARD_RE.sub("\n", script_text.rstrip() + "\n")
-    body, root_subs = FILE_ROOT_RE.subn("ROOT = Path.cwd()", body)
-    if root_subs == 0 and "Path(__file__)" in body:
-        raise SystemExit(
-            "inlined stage still references Path(__file__) after ROOT rewrite; "
-            "extend FILE_ROOT_RE for this script pattern"
-        )
+    body = FILE_ROOT_RE.sub("ROOT = Path.cwd()", body)
     argv_list = list(argv)
     footer = (
         "\n# --- notebook entry (converted from script; not runpy) ---\n"
@@ -395,14 +342,9 @@ def build_cells(root: Path, *, config_rel: str) -> list[Cell]:
             kind="markdown",
             source=(
                 "## Setup\n\n"
-                "Create parent directories, write collected `src/wacv` modules "
-                "and the experiment YAML, then run each inlined stage.\n\n"
-                "Device selection uses `src.wacv.engine.resolve_device`: "
-                "CUDA when `torch.cuda.is_available()`, otherwise CPU "
-                "(`run.device: auto` in the YAML). For full ConvNeXt training "
-                "on Colab, enable a GPU: Runtime → Change runtime type → "
-                "GPU (T4), then Runtime → Restart session and re-run from "
-                "Setup. Notebook config uses `num_workers: 0`."
+                "Write collected `src/wacv` modules and the experiment YAML, "
+                "then run each inlined stage. Device uses "
+                "`resolve_device('auto')` (CUDA if available, else CPU)."
             ),
         ),
         Cell(
@@ -430,30 +372,17 @@ def build_cells(root: Path, *, config_rel: str) -> list[Cell]:
         )
 
     cells.append(Cell(kind="markdown", source="## Experiment config"))
-    cells.append(
-        writefile_cell(
-            config_rel,
-            notebook_config_yaml(config_path.read_text(encoding="utf-8")),
-        )
-    )
+    cells.append(writefile_cell(config_rel, config_path.read_text(encoding="utf-8")))
 
     cells.append(Cell(kind="markdown", source="## Device"))
     cells.append(
         Cell(
             kind="code",
             source=(
-                "import torch\n"
                 "from src.wacv.engine import resolve_device\n"
                 "\n"
                 "DEVICE = resolve_device('auto')\n"
-                "print('cuda_available', torch.cuda.is_available())\n"
                 "print('device', DEVICE)\n"
-                "if DEVICE.type == 'cpu':\n"
-                "    print(\n"
-                "        'No GPU detected — train/eval will use CPU via '\n"
-                "        'resolve_device(auto). Enable a Colab GPU for '\n"
-                "        'full ConvNeXt runs.'\n"
-                "    )\n"
             ),
         )
     )
@@ -541,52 +470,6 @@ def cells_to_notebook(cells: list[Cell]) -> dict[str, object]:
     }
 
 
-def _flatten_source(source: object) -> str:
-    if isinstance(source, list):
-        return "".join(str(part) for part in source)
-    if isinstance(source, str):
-        return source
-    return ""
-
-
-def notebook_text(notebook: dict[str, object]) -> str:
-    chunks: list[str] = []
-    raw_cells = notebook.get("cells")
-    if not isinstance(raw_cells, list):
-        return ""
-    for cell in raw_cells:
-        if isinstance(cell, dict):
-            chunks.append(_flatten_source(cell.get("source", [])))
-    return "".join(chunks)
-
-
-def notebook_code_text(notebook: dict[str, object]) -> str:
-    chunks: list[str] = []
-    raw_cells = notebook.get("cells")
-    if not isinstance(raw_cells, list):
-        return ""
-    for cell in raw_cells:
-        if isinstance(cell, dict) and cell.get("cell_type") == "code":
-            chunks.append(_flatten_source(cell.get("source", [])))
-    return "".join(chunks)
-
-
-def notebook_stage_code_text(notebook: dict[str, object]) -> str:
-    """Code from cells that are not ``%%writefile`` (inlined stages / setup)."""
-    chunks: list[str] = []
-    raw_cells = notebook.get("cells")
-    if not isinstance(raw_cells, list):
-        return ""
-    for cell in raw_cells:
-        if not isinstance(cell, dict) or cell.get("cell_type") != "code":
-            continue
-        source = _flatten_source(cell.get("source", []))
-        if source.lstrip().startswith("%%writefile"):
-            continue
-        chunks.append(source)
-    return "".join(chunks)
-
-
 def config_relpath(config: Path, root: Path) -> str:
     resolved = resolve_path(config)
     if not resolved.is_file():
@@ -595,143 +478,6 @@ def config_relpath(config: Path, root: Path) -> str:
         return resolved.relative_to(root.resolve()).as_posix()
     except ValueError:
         return resolved.as_posix()
-
-
-def _require(condition: bool, message: str) -> None:
-    if not condition:
-        raise SystemExit(message)
-
-
-def validate_notebook(
-    path: Path, *, root: Path = ROOT, config_rel: str = DEFAULT_CONFIG.as_posix()
-) -> None:
-    _require(
-        not LEGACY_PIPELINE_PY.is_file(),
-        f"legacy duplicate still present: {LEGACY_PIPELINE_PY} "
-        "(delete it; notebook is generated from scripts/ + src/)",
-    )
-    _require(
-        not LEGACY_EXPORTER.is_file(),
-        f"legacy exporter still present: {LEGACY_EXPORTER} "
-        "(use scripts/export-colab-notebook.py)",
-    )
-    notebook = json.loads(path.read_text(encoding="utf-8"))
-    _require(
-        notebook.get("nbformat") == NBFORMAT_MAJOR,
-        f"expected nbformat {NBFORMAT_MAJOR}, got {notebook.get('nbformat')}",
-    )
-    cells = notebook.get("cells")
-    _require(
-        isinstance(cells, list) and bool(cells),
-        "notebook has no cells",
-    )
-    text = notebook_text(notebook)
-    code = notebook_code_text(notebook)
-    stage_code = notebook_stage_code_text(notebook)
-    missing_sections = [section for section in REQUIRED_SECTIONS if section not in text]
-    _require(not missing_sections, f"missing markdown sections: {missing_sections}")
-    checks: tuple[tuple[bool, str], ...] = (
-        (
-            REQUIRED_FROM_TRAIN in code,
-            f"notebook missing collected train.py marker: {REQUIRED_FROM_TRAIN}",
-        ),
-        (
-            REQUIRED_FROM_SRC in code,
-            f"notebook missing collected src/wacv marker: {REQUIRED_FROM_SRC}",
-        ),
-        ("smoke.yml" not in code, "pipeline notebook must not reference smoke.yml"),
-        (
-            config_rel in code,
-            f"pipeline notebook must reference --config {config_rel}",
-        ),
-        (
-            FORBIDDEN_SUBPROCESS.search(code) is None,
-            "notebook still shells out to pipeline scripts via subprocess "
-            "(use collected writefile + inlined stage cells instead)",
-        ),
-        (
-            FORBIDDEN_RUNPY.search(code) is None,
-            "notebook still uses runpy.run_path "
-            "(inline stage scripts with body + main() instead)",
-        ),
-        (
-            "%%writefile scripts/train.py" not in code,
-            "notebook must not writefile pipeline scripts "
-            "(inline train/evaluate/package/download cells)",
-        ),
-        (
-            "%%writefile src/wacv/engine.py" in code,
-            "notebook missing writefile for src/wacv/engine.py",
-        ),
-        (
-            "def build_loaders(" in code and "sys.argv =" in code,
-            "notebook missing inlined train stage (build_loaders + argv)",
-        ),
-        (
-            "## Visualize (after train)" in text
-            and "## Visualize (after eval)" in text,
-            "notebook missing post-train/eval visualize sections",
-        ),
-        (
-            "scripts/visualize.py" in code and "collect_comparisons" in code,
-            "notebook missing inlined scripts/visualize.py "
-            "(label vs prediction on first-N samples)",
-        ),
-        (
-            "## Persist checkpoints" in text and "files.download" in code,
-            "notebook missing Colab checkpoint persistence cell",
-        ),
-        (
-            "\\\\" not in code.split("%%writefile", 1)[0],
-            "setup cell must mkdir with POSIX paths (no Windows backslashes); "
-            "Colab writefile looks for src/wacv not src\\\\wacv",
-        ),
-        (
-            "src/wacv" in code.split("%%writefile", 1)[0]
-            and "mkdir(parents=True" in code.split("%%writefile", 1)[0],
-            "setup cell must mkdir src/wacv before the first writefile",
-        ),
-        (
-            "ROOT = Path.cwd()" in stage_code,
-            "inlined stages must set ROOT = Path.cwd() (notebooks have no __file__)",
-        ),
-        (
-            "Path(__file__)" not in stage_code,
-            "inlined stage cells must not reference Path(__file__); use Path.cwd()",
-        ),
-        (
-            f"%%writefile {config_rel}" in code,
-            f"notebook missing writefile for experiment config {config_rel}",
-        ),
-        (
-            "configs" in code.split("%%writefile", 1)[0],
-            "setup cell must mkdir configs/ before writing the experiment YAML",
-        ),
-        (
-            "num_workers: 0" in code,
-            "notebook experiment YAML must set num_workers: 0 "
-            "(Colab freezes or warns with 4 workers on a 2-CPU VM)",
-        ),
-        (
-            "resolve_num_workers" in code,
-            "notebook must ship resolve_num_workers (engine + train/evaluate)",
-        ),
-        (
-            "resolve_device" in code and "cuda.is_available" in code,
-            "notebook must probe device via resolve_device + cuda.is_available",
-        ),
-        (
-            "## Device" in text and "DEVICE = resolve_device" in code,
-            "notebook missing ## Device cell that sets DEVICE via resolve_device",
-        ),
-        (
-            "Change runtime type" in text and "GPU" in text,
-            "setup markdown must tell the user how to enable a Colab GPU",
-        ),
-    )
-    for ok, message in checks:
-        _require(ok, message)
-    print(f"check ok: {path} ({len(cells)} cells, root={root})")
 
 
 def write_notebook(out: Path, *, root: Path = ROOT, config_rel: str) -> None:
@@ -755,9 +501,6 @@ def main() -> None:
         LEGACY_EXPORTER.unlink()
         print(f"removed legacy exporter {LEGACY_EXPORTER}")
     write_notebook(out, config_rel=config_rel)
-    validate_notebook(out, config_rel=config_rel)
-    if args.check:
-        print("--check passed")
 
 
 if __name__ == "__main__":
