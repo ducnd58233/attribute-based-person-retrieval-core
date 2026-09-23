@@ -2,11 +2,12 @@
 
 Source of truth is the pipeline scripts and the ``src.wacv`` modules they
 import. This exporter AST-walks those imports, emits ``%%writefile`` cells for
-collected ``src/wacv`` modules, then inlines each stage script as a code cell
-(body + ``main()``, not ``runpy``). After train and eval it inlines
-``scripts/visualize.py`` (first-N label vs prediction). A final persist cell
-offers Colab ``files.download`` / Drive notes. The notebook is an on-demand
-artifact (not committed). There is no ``train_pipeline.py``.
+collected ``src/wacv`` modules and the chosen experiment YAML, then inlines
+each stage script as a code cell (body + ``main()``, not ``runpy``). After
+train and eval it inlines ``scripts/visualize.py`` (first-N label vs
+prediction). A final persist cell offers Colab ``files.download`` / Drive
+notes. The notebook is an on-demand artifact (not committed). There is no
+``train_pipeline.py``.
 
 Usage:
   uv run python scripts/export-colab-notebook.py \\
@@ -334,11 +335,16 @@ def build_cells(root: Path, *, config_rel: str) -> list[Cell]:
         if not script.is_file():
             raise SystemExit(f"missing pipeline script: {script}")
 
+    config_path = resolve_path(Path(config_rel))
+    if not config_path.is_file():
+        raise SystemExit(f"missing config: {config_path}")
+
     src_files = collect_src_files(scripts, root)
     if not src_files:
         raise SystemExit("AST walk found no src.wacv modules — refusing empty collect")
 
     writefile_paths = [rel_posix(path, root) for path in src_files]
+    writefile_paths.append(config_rel)
     # Always POSIX: Windows Path.parent stringifies with backslashes, and Colab
     # (Linux) would then mkdir a literal "src\\wacv" name instead of src/wacv.
     parents = sorted(
@@ -365,8 +371,8 @@ def build_cells(root: Path, *, config_rel: str) -> list[Cell]:
             kind="markdown",
             source=(
                 "## Setup\n\n"
-                "Create parent directories, write collected `src/wacv` modules, "
-                "then run each inlined stage."
+                "Create parent directories, write collected `src/wacv` modules "
+                "and the experiment YAML, then run each inlined stage."
             ),
         ),
         Cell(
@@ -392,6 +398,9 @@ def build_cells(root: Path, *, config_rel: str) -> list[Cell]:
         cells.append(
             writefile_cell(rel_posix(path, root), path.read_text(encoding="utf-8"))
         )
+
+    cells.append(Cell(kind="markdown", source="## Experiment config"))
+    cells.append(writefile_cell(config_rel, config_path.read_text(encoding="utf-8")))
 
     for stage in stages:
         script = resolve_path(stage.script)
@@ -633,6 +642,14 @@ def validate_notebook(
         (
             "Path(__file__)" not in stage_code,
             "inlined stage cells must not reference Path(__file__); use Path.cwd()",
+        ),
+        (
+            f"%%writefile {config_rel}" in code,
+            f"notebook missing writefile for experiment config {config_rel}",
+        ),
+        (
+            "configs" in code.split("%%writefile", 1)[0],
+            "setup cell must mkdir configs/ before writing the experiment YAML",
         ),
     )
     for ok, message in checks:
