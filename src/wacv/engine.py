@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import importlib
 import os
 import random
 from collections.abc import Iterable
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -43,14 +45,20 @@ class RankingEvalData:
 
 
 def resolve_device(requested: DeviceName) -> torch.device:
-    """Return CUDA when available for ``auto``, else CPU.
+    """Resolve ``auto`` / ``cpu`` / ``cuda`` / ``tpu`` for notebooks and CLIs.
 
-    Notebooks and CLIs share this helper. ``cuda`` raises if no GPU exists.
+    ``auto``: CUDA, else ``torch_xla`` when importable, else CPU.
     """
-    if requested == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if requested == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA was requested but is not available")
+    if requested == "cuda" or (requested == "auto" and torch.cuda.is_available()):
+        return torch.device("cuda")
+    if requested in ("auto", "tpu"):
+        try:
+            xm = importlib.import_module("torch_xla.core.xla_model")
+            return xm.xla_device()
+        except Exception:
+            if requested == "tpu":
+                raise RuntimeError("TPU / torch_xla is not available") from None
+            return torch.device("cpu")
     return torch.device(requested)
 
 
@@ -112,27 +120,36 @@ class Trainer:
             disable=not self.config.run.progress,
             leave=False,
         )
+        use_amp = self.scaler.is_enabled()
+        autocast_type = "cuda" if use_amp else "cpu"
         for images, targets in batches:
             batch_images = images.to(self.device, non_blocking=True)
             batch_targets = targets.to(self.device, non_blocking=True)
             self.optimizer.zero_grad(set_to_none=True)
-            with torch.autocast(
-                device_type=self.device.type, enabled=self.scaler.is_enabled()
-            ):
+            with torch.autocast(device_type=autocast_type, enabled=use_amp):
                 smoothing = self.config.optimization.label_smoothing
                 loss_targets = batch_targets * (1.0 - smoothing) + 0.5 * smoothing
                 loss = self.criterion(self.model(batch_images), loss_targets)
-            self.scaler.scale(loss).backward()
+            if use_amp:
+                self.scaler.scale(loss).backward()
+            else:
+                loss.backward()
             if self.config.optimization.grad_clip_norm is not None:
-                self.scaler.unscale_(self.optimizer)
+                if use_amp:
+                    self.scaler.unscale_(self.optimizer)
                 nn.utils.clip_grad_norm_(
                     self.model.parameters(), self.config.optimization.grad_clip_norm
                 )
-            scale_before_step = self.scaler.get_scale()
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-            if self.scaler.get_scale() >= scale_before_step:
+            if self.device.type == "xla":
+                xm = importlib.import_module("torch_xla.core.xla_model")
+                xm.optimizer_step(self.optimizer)
                 self.ema_model.update_parameters(self.model)
+            else:
+                scale_before = self.scaler.get_scale()
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                if self.scaler.get_scale() >= scale_before:
+                    self.ema_model.update_parameters(self.model)
 
             batch_size = batch_targets.shape[0]
             total_loss += loss.detach().item() * batch_size
@@ -153,13 +170,13 @@ class Trainer:
             disable=not self.config.run.progress,
             leave=False,
         )
+        use_amp = self.scaler.is_enabled()
+        autocast_type = "cuda" if use_amp else "cpu"
         with torch.inference_mode():
             for images, targets in batches:
                 batch_images = images.to(self.device, non_blocking=True)
                 batch_targets = targets.to(self.device, non_blocking=True)
-                with torch.autocast(
-                    device_type=self.device.type, enabled=self.scaler.is_enabled()
-                ):
+                with torch.autocast(device_type=autocast_type, enabled=use_amp):
                     loss = self.criterion(self.ema_model(batch_images), batch_targets)
                 batch_size = batch_targets.shape[0]
                 total_loss += loss.item() * batch_size
@@ -233,7 +250,7 @@ class Trainer:
         best_metric = float("-inf") if select_higher_is_better else float("inf")
         epochs_without_improvement = 0
         resume_path = self.config.run.resume
-        if resume_path is not None and resume_path.is_file():
+        if isinstance(resume_path, Path) and resume_path.is_file():
             state = self.checkpoints.load(resume_path, map_location=self.device)
             start_epoch = state.next_epoch
             global_step = state.global_step
