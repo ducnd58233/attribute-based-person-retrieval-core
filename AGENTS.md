@@ -91,6 +91,22 @@ here.
   fluff (e.g. `run.py imports cleanly with no network access`). Docker /
   CLI entrypoints should call the real API (`import run; run.load_model()`)
   and let failures surface as exceptions.
+- **Optional accelerators stay optional (MUST):** Colab/Kaggle TPU (and any
+  similar hosted accelerator) is a *runtime* concern, not a local-env pin.
+  Do **not** add `torch_xla` (or equivalent) to `environment.yml` /
+  `pyproject.toml` for the CUDA training machine. Detect/load with
+  `importlib` inside the rare path only so importing `src.wacv` still works
+  without that package. Keep `resolve_device` and the XLA train-step branch
+  short — no multi-probe device inventories, no long install-essay
+  `RuntimeError` strings, no helper sprawl for a one-line `xm.optimizer_step`.
+  AMP / `GradScaler` remain CUDA-only; never enable them on XLA or CPU.
+- **Colab/Kaggle notebook viz (MUST):** `scripts/export-colab-notebook.py`
+  emits **one** Visualize stage after Eval (val split), not a second copy
+  after Train. Attribute comparison figures must be readable in a notebook
+  (dedicated text panel / large enough type with explicit TP/FP/FN meaning)
+  — not a dense grid of 7pt xlabel dumps. Regenerate the gitignored
+  notebook via the exporter; do not hand-edit the `.ipynb` as source of
+  truth.
 - **`Path(__file__)` in the Colab export — know which case you're in
   (MUST):** `scripts/export-colab-notebook.py` inlines each pipeline stage
   script's *body* directly as notebook-cell source, not loaded from a real
