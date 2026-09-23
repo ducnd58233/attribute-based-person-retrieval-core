@@ -263,3 +263,6 @@ $RECYCLE.BIN/
 
 # vibe-agent run/session state — local only, never shared
 /.agent-state/
+
+# Local experiment artifacts and checkpoints
+/runs/

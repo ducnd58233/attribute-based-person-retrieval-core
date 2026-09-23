@@ -74,6 +74,9 @@ here.
 - **Never commit trained model weights** to git history directly; use
   Git LFS, Hugging Face Hub, or another artifact store, and document
   wherever weights are pulled from in the model's own README.
+- **Do not add automated tests to this repository unless the user explicitly
+  asks for them.** Validate implementation work with the existing checks,
+  static analysis, and bounded smoke runs instead.
 
 </always_on>
 
