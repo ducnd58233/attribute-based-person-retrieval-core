@@ -14,6 +14,7 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 from tqdm import tqdm
+from tqdm.contrib.logging import logging_redirect_tqdm
 
 from src.wacv.checkpoint import CheckpointManager
 from src.wacv.config import DeviceName, ExperimentConfig
@@ -215,45 +216,47 @@ class Trainer:
             range(start_epoch, self.config.optimization.epochs),
             desc="epochs",
             disable=not self.config.run.progress,
+            dynamic_ncols=True,
         )
-        for epoch in epoch_bar:
-            train_loss, step_delta = self._train_epoch(train_loader, epoch)
-            global_step += step_delta
-            val_loss = self._validate_epoch(val_loader, epoch)
-            self.scheduler.step(val_loss)
-            improved = val_loss < best_metric
-            if improved:
-                best_metric = val_loss
-            metrics: dict[str, float] = {
-                "train/loss": train_loss,
-                "val/loss": val_loss,
-                "learning_rate": self.optimizer.param_groups[0]["lr"],
-            }
-            postfix: dict[str, str] = {
-                "train": f"{train_loss:.4f}",
-                "val": f"{val_loss:.4f}",
-            }
-            if ranking is not None:
-                ranking_metrics = self._ranking_metrics(ranking)
-                for key, value in ranking_metrics.items():
-                    metrics[f"val/{key}"] = value
-                postfix["mAP"] = f"{ranking_metrics['mAP']:.4f}"
-                postfix["R1"] = f"{ranking_metrics['Rank-1']:.4f}"
-            epoch_bar.set_postfix(ordered_dict=dict(postfix))
-            self.tracker.log_metrics(epoch, metrics)
-            self.checkpoints.save(
-                self.tracker.checkpoint_dir / "last.pt",
-                epoch=epoch,
-                global_step=global_step,
-                best_metric=best_metric,
-            )
-            if improved:
+        with logging_redirect_tqdm(loggers=[self.tracker.logger]):
+            for epoch in epoch_bar:
+                train_loss, step_delta = self._train_epoch(train_loader, epoch)
+                global_step += step_delta
+                val_loss = self._validate_epoch(val_loader, epoch)
+                self.scheduler.step(val_loss)
+                improved = val_loss < best_metric
+                if improved:
+                    best_metric = val_loss
+                metrics: dict[str, float] = {
+                    "train/loss": train_loss,
+                    "val/loss": val_loss,
+                    "learning_rate": self.optimizer.param_groups[0]["lr"],
+                }
+                postfix: dict[str, str] = {
+                    "train": f"{train_loss:.4f}",
+                    "val": f"{val_loss:.4f}",
+                }
+                if ranking is not None:
+                    ranking_metrics = self._ranking_metrics(ranking)
+                    for key, value in ranking_metrics.items():
+                        metrics[f"val/{key}"] = value
+                    postfix["mAP"] = f"{ranking_metrics['mAP']:.4f}"
+                    postfix["R1"] = f"{ranking_metrics['Rank-1']:.4f}"
+                epoch_bar.set_postfix(ordered_dict=dict(postfix))
+                self.tracker.log_metrics(epoch, metrics)
                 self.checkpoints.save(
-                    self.tracker.checkpoint_dir / "best.pt",
+                    self.tracker.checkpoint_dir / "last.pt",
                     epoch=epoch,
                     global_step=global_step,
                     best_metric=best_metric,
                 )
-            end_epoch = epoch
+                if improved:
+                    self.checkpoints.save(
+                        self.tracker.checkpoint_dir / "best.pt",
+                        epoch=epoch,
+                        global_step=global_step,
+                        best_metric=best_metric,
+                    )
+                end_epoch = epoch
 
         return FitResult(start_epoch, end_epoch, global_step, best_metric)
