@@ -31,7 +31,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    from src.wacv.attributes import ATTRIBUTE_NAMES, NUM_ATTRIBUTES
+    from src.wacv.attributes import attribute_names_from_columns
     from src.wacv.checkpoint import load_model_weights
     from src.wacv.config import load_config
     from src.wacv.data import AttributeDataset, load_gt, load_queries
@@ -49,26 +49,31 @@ def main() -> None:
 
     val_root = config.data.root / "annotations" / "task2" / "val"
     ground_truth = load_gt(val_root / "gt.csv")
+    attribute_names = attribute_names_from_columns(
+        tuple(str(c) for c in ground_truth.columns)
+    )
     queries = load_queries(val_root / "queries.csv")
     if config.data.limit is not None:
         ground_truth = ground_truth.iloc[: config.data.limit]
         queries = queries[: config.data.limit]
 
     loader = DataLoader(
-        AttributeDataset(ground_truth, config.data.root),
+        AttributeDataset(
+            ground_truth, config.data.root, attribute_names=attribute_names
+        ),
         batch_size=config.data.batch_size,
         num_workers=config.data.num_workers,
         pin_memory=device.type == "cuda",
         persistent_workers=config.data.num_workers > 0,
     )
     inference_model = config.model.model_copy(update={"pretrained": False})
-    model = build_model(inference_model, num_attributes=NUM_ATTRIBUTES).to(device)
+    model = build_model(inference_model, num_attributes=len(attribute_names)).to(device)
     load_model_weights(checkpoint.resolve(), model, map_location=device)
 
     probabilities = predict_probabilities(
         model, loader, device, progress=config.run.progress
     )
-    attributes = ground_truth[list(ATTRIBUTE_NAMES)].to_numpy(dtype=np.int64)
+    attributes = ground_truth[list(attribute_names)].to_numpy(dtype=np.int64)
     metrics = evaluate_ranking(queries, attributes, l1_distance(queries, probabilities))
     metrics["mA"] = mean_accuracy(probabilities, attributes)
     serialized = json.dumps(metrics, indent=2, sort_keys=True) + "\n"
