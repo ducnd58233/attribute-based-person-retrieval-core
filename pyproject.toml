@@ -110,6 +110,8 @@ ignore = [
 # Re-export lists are grouped by subsystem with comments, which is easier to
 # navigate than one alphabetical run across every layer of the package.
 "src/*/__init__.py" = ["RUF022"]
+# Percent notebooks intentionally re-import per cell; treat as notebook source.
+"notebooks/train_pipeline.py" = ["E402", "F404", "F811"]
 
 [tool.ruff.lint.pylint]
 max-statements = 40
