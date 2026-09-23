@@ -243,6 +243,7 @@ def persist_checkpoints_cell() -> Cell:
         kind="code",
         source=(
             "# Colab VM disk is ephemeral - download or copy to Drive.\n"
+            "import shutil\n"
             "from pathlib import Path\n"
             "\n"
             "candidates = [\n"
@@ -253,17 +254,47 @@ def persist_checkpoints_cell() -> Cell:
             "existing = [p for p in candidates if p.exists()]\n"
             "print('Found:', existing)\n"
             "\n"
+            "archive = None\n"
+            "if existing:\n"
+            "    staging = Path('wacv_artifacts')\n"
+            "    if staging.exists():\n"
+            "        shutil.rmtree(staging)\n"
+            "    staging.mkdir()\n"
+            "    for path in existing:\n"
+            "        dest = staging / path.name\n"
+            "        if path.is_dir():\n"
+            "            shutil.copytree(path, dest)\n"
+            "        else:\n"
+            "            shutil.copy2(path, dest)\n"
+            "    archive = Path(\n"
+            "        shutil.make_archive('wacv_artifacts', 'zip', staging)\n"
+            "    )\n"
+            "    print('Bundled into', archive)\n"
+            "\n"
             "try:\n"
             "    from google.colab import files  # type: ignore[import-not-found]\n"
             "\n"
-            "    for path in existing:\n"
-            "        if path.is_file():\n"
-            "            print('Downloading', path)\n"
-            "            files.download(str(path))\n"
-            "        else:\n"
-            "            print('Skip directory (zip it first if needed):', path)\n"
+            "    if archive is not None:\n"
+            "        print('Downloading', archive)\n"
+            "        files.download(str(archive))\n"
             "except ImportError:\n"
             "    print('Not Colab; files remain on local disk at the paths above.')\n"
+            "\n"
+            "# files.download() above is a silent no-op when this Colab runtime is\n"
+            "# reached through the VS Code/Cursor Colab extension rather than the\n"
+            "# colab.research.google.com web UI (googlecolab/colab-vscode#267) --\n"
+            "# it does not raise, it just does nothing. FileLink instead renders an\n"
+            "# HTML anchor via core Jupyter display, which VS Code's Jupyter/Colab\n"
+            "# integration can save from, so offer it either way.\n"
+            "if archive is not None:\n"
+            "    from IPython.display import FileLink, display\n"
+            "\n"
+            "    print(\n"
+            "        'If no browser download started above (common when '\n"
+            "        'connecting through VS Code or Cursor rather than '\n"
+            "        'colab.research.google.com), use this link instead:'\n"
+            "    )\n"
+            "    display(FileLink(str(archive)))\n"
             "\n"
             "# Optional persistence on Drive (better for multi-GB checkpoints):\n"
             "# from google.colab import drive\n"
@@ -294,6 +325,54 @@ def visualize_stage(config_rel: str, *, split: str, limit: int = 10) -> Stage:
     )
 
 
+def device_cells() -> list[Cell]:
+    """`## Device` section: resolve CUDA-if-available once, shared by every stage."""
+    return [
+        Cell(kind="markdown", source="## Device"),
+        Cell(
+            kind="code",
+            source=(
+                "from src.wacv.engine import resolve_device\n"
+                "\n"
+                "DEVICE = resolve_device('auto')\n"
+                "print('device', DEVICE)\n"
+            ),
+        ),
+    ]
+
+
+def resolved_submission_files() -> list[Path]:
+    """Locate + validate the tracked submission/run.py + metadata.yaml template."""
+    files = [
+        resolve_path(Path("submission") / name) for name in ("run.py", "metadata.yaml")
+    ]
+    for path in files:
+        if not path.is_file():
+            raise SystemExit(f"missing submission template file: {path}")
+    return files
+
+
+def submission_template_cells(
+    submission_files: Sequence[Path], root: Path
+) -> list[Cell]:
+    """`## Submission template` section: writefile cells for run.py + metadata.yaml."""
+    cells: list[Cell] = [
+        Cell(
+            kind="markdown",
+            source=(
+                "## Submission template\n\n"
+                "`run.py` + `metadata.yaml` the `## Package` stage copies "
+                "into `build/submission/`."
+            ),
+        )
+    ]
+    for path in submission_files:
+        cells.append(
+            writefile_cell(rel_posix(path, root), path.read_text(encoding="utf-8"))
+        )
+    return cells
+
+
 def build_cells(root: Path, *, config_rel: str) -> list[Cell]:
     stages = stages_for_config(config_rel)
     visualize_stages = (
@@ -314,8 +393,14 @@ def build_cells(root: Path, *, config_rel: str) -> list[Cell]:
     if not src_files:
         raise SystemExit("AST walk found no src.wacv modules — refusing empty collect")
 
+    # scripts/package-submission.py copies these with shutil, not `import`, so
+    # the AST walk above never discovers them; write them explicitly or the
+    # Package stage fails with FileNotFoundError on a fresh Colab filesystem.
+    submission_files = resolved_submission_files()
+
     writefile_paths = [rel_posix(path, root) for path in src_files]
     writefile_paths.append(config_rel)
+    writefile_paths.extend(rel_posix(path, root) for path in submission_files)
     # Always POSIX: Windows Path.parent stringifies with backslashes, and Colab
     # (Linux) would then mkdir a literal "src\\wacv" name instead of src/wacv.
     parents = sorted(
@@ -373,19 +458,8 @@ def build_cells(root: Path, *, config_rel: str) -> list[Cell]:
 
     cells.append(Cell(kind="markdown", source="## Experiment config"))
     cells.append(writefile_cell(config_rel, config_path.read_text(encoding="utf-8")))
-
-    cells.append(Cell(kind="markdown", source="## Device"))
-    cells.append(
-        Cell(
-            kind="code",
-            source=(
-                "from src.wacv.engine import resolve_device\n"
-                "\n"
-                "DEVICE = resolve_device('auto')\n"
-                "print('device', DEVICE)\n"
-            ),
-        )
-    )
+    cells.extend(submission_template_cells(submission_files, root))
+    cells.extend(device_cells())
 
     for stage in stages:
         script = resolve_path(stage.script)

@@ -4,10 +4,34 @@ from __future__ import annotations
 
 import json
 import logging
+from contextlib import suppress
 from datetime import UTC, datetime
+from pathlib import Path
 from types import TracebackType
 
 from src.wacv.config import ExperimentConfig
+
+# Matches ExperimentConfig.model_dump's dotted keys for its Path fields.
+_PATH_FIELDS: tuple[str, ...] = ("run.output_dir", "data.root", "run.resume")
+
+
+def _record_config(config: ExperimentConfig, root: Path) -> dict[str, object]:
+    """Dump config for config.json with path fields root-relative when possible.
+
+    Written for portability across environments (e.g. a local dev machine vs
+    Colab) that resolve the same YAML to different absolute paths. Nothing
+    downstream reads config.json back in, so this only affects the record.
+    """
+    payload = config.model_dump(mode="json")
+    for dotted in _PATH_FIELDS:
+        section, field = dotted.split(".")
+        value = payload[section].get(field)
+        if value is None:
+            continue
+        absolute = Path(value)
+        with suppress(ValueError):  # outside root: keep absolute (e.g. external resume)
+            payload[section][field] = absolute.relative_to(root).as_posix()
+    return payload
 
 
 class RunTracker:
@@ -26,9 +50,10 @@ class RunTracker:
         self.metrics_path = self.run_dir / "metrics.jsonl"
         self.logger = self._build_logger()
 
+        root = Path(__file__).resolve().parents[2]
         config_path = self.run_dir / "config.json"
         config_path.write_text(
-            json.dumps(config.model_dump(mode="json"), indent=2) + "\n",
+            json.dumps(_record_config(config, root), indent=2) + "\n",
             encoding="utf-8",
         )
 
