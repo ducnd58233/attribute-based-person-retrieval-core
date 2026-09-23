@@ -25,7 +25,7 @@ optimization:
 run:
   name: convnext-baseline
   output_dir: runs
-  resume: null
+  resume: true
   seed: 42
   device: auto
   progress: true

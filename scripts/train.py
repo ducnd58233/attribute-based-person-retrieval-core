@@ -44,6 +44,7 @@ def build_loaders(
         AttributeDataset,
         load_gt,
     )
+    from src.wacv.engine import resolve_num_workers
 
     annotation_root = config.data.root / "annotations" / "task1"
     train_gt = load_gt(annotation_root / "train" / "gt.csv")
@@ -64,21 +65,22 @@ def build_loaders(
     val_dataset = AttributeDataset(
         val_gt, config.data.root, IMAGE_TRANSFORM, attribute_names=attribute_names
     )
+    workers = resolve_num_workers(config.data.num_workers)
     train_loader = DataLoader(
         train_dataset,
         batch_size=config.data.batch_size,
         shuffle=True,
-        num_workers=config.data.num_workers,
+        num_workers=workers,
         pin_memory=device.type == "cuda",
-        persistent_workers=config.data.num_workers > 0,
+        persistent_workers=workers > 0,
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=config.data.batch_size,
         shuffle=False,
-        num_workers=config.data.num_workers,
+        num_workers=workers,
         pin_memory=device.type == "cuda",
-        persistent_workers=config.data.num_workers > 0,
+        persistent_workers=workers > 0,
     )
 
     positive_rates = train_gt[list(attribute_names)].astype(float).mean()
@@ -98,7 +100,7 @@ def build_ranking_eval(
 
     from src.wacv.attributes import attribute_names_from_columns
     from src.wacv.data import AttributeDataset, load_gt, load_queries
-    from src.wacv.engine import RankingEvalData
+    from src.wacv.engine import RankingEvalData, resolve_num_workers
 
     val_root = config.data.root / "annotations" / "task2" / "val"
     gt_path = val_root / "gt.csv"
@@ -119,15 +121,16 @@ def build_ranking_eval(
         ground_truth = ground_truth.iloc[: config.data.limit]
         queries = queries[: config.data.limit]
 
+    workers = resolve_num_workers(config.data.num_workers)
     loader = DataLoader(
         AttributeDataset(
             ground_truth, config.data.root, attribute_names=attribute_names
         ),
         batch_size=config.data.batch_size,
         shuffle=False,
-        num_workers=config.data.num_workers,
+        num_workers=workers,
         pin_memory=device.type == "cuda",
-        persistent_workers=config.data.num_workers > 0,
+        persistent_workers=workers > 0,
     )
     gallery_attrs = ground_truth[list(attribute_names)].to_numpy(dtype=np.int64)
     return RankingEvalData(
@@ -146,6 +149,11 @@ def main() -> None:
     config = load_config(parse_args().config)
     seed_everything(config.run.seed)
     device = resolve_device(config.run.device)
+    if device.type == "cpu":
+        LOGGER.warning(
+            "no CUDA available; training on CPU (slow for ConvNeXt). "
+            "On Colab: Runtime → Change runtime type → GPU."
+        )
     train_loader, val_loader, pos_weight, num_attributes = build_loaders(config, device)
     ranking = build_ranking_eval(config, device)
 

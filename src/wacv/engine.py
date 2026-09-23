@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import random
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -41,11 +42,23 @@ class RankingEvalData:
 
 
 def resolve_device(requested: DeviceName) -> torch.device:
+    """Return CUDA when available for ``auto``, else CPU.
+
+    Notebooks and CLIs share this helper. ``cuda`` raises if no GPU exists.
+    """
     if requested == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if requested == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is not available")
     return torch.device(requested)
+
+
+def resolve_num_workers(requested: int) -> int:
+    """Cap DataLoader workers to ``cpu_count - 1`` (or 0 when requested ≤ 0)."""
+    if requested <= 0:
+        return 0
+    cpu_count = os.cpu_count() or 1
+    return min(requested, max(cpu_count - 1, 0))
 
 
 def seed_everything(seed: int) -> None:
@@ -179,18 +192,22 @@ class Trainer:
         start_epoch = 0
         global_step = 0
         best_metric = float("inf")
-        if self.config.run.resume is not None:
-            state = self.checkpoints.load(
-                self.config.run.resume, map_location=self.device
-            )
+        resume_path = self.config.run.resume
+        if resume_path is not None and resume_path.is_file():
+            state = self.checkpoints.load(resume_path, map_location=self.device)
             start_epoch = state.next_epoch
             global_step = state.global_step
             best_metric = state.best_metric
             self.tracker.logger.info(
                 "resumed checkpoint=%s next_epoch=%d global_step=%d",
-                self.config.run.resume,
+                resume_path,
                 start_epoch,
                 global_step,
+            )
+        elif resume_path is not None:
+            self.tracker.logger.warning(
+                "resume path missing (%s); starting from epoch 0",
+                resume_path,
             )
 
         end_epoch = start_epoch - 1

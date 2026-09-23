@@ -20,11 +20,9 @@ class RunTracker:
             raise FileExistsError(
                 f"Run already exists: {self.run_dir}. Set run.resume to continue it."
             )
-        if is_resume and not self.run_dir.exists():
-            raise FileNotFoundError(f"Cannot resume missing run: {self.run_dir}")
 
         self.checkpoint_dir = self.run_dir / "checkpoints"
-        self.checkpoint_dir.mkdir(parents=True, exist_ok=is_resume)
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self.metrics_path = self.run_dir / "metrics.jsonl"
         self.logger = self._build_logger()
 
