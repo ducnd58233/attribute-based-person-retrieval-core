@@ -192,18 +192,22 @@ class Trainer:
         start_epoch = 0
         global_step = 0
         best_metric = float("inf")
-        if self.config.run.resume is not None:
-            state = self.checkpoints.load(
-                self.config.run.resume, map_location=self.device
-            )
+        resume_path = self.config.run.resume
+        if resume_path is not None and resume_path.is_file():
+            state = self.checkpoints.load(resume_path, map_location=self.device)
             start_epoch = state.next_epoch
             global_step = state.global_step
             best_metric = state.best_metric
             self.tracker.logger.info(
                 "resumed checkpoint=%s next_epoch=%d global_step=%d",
-                self.config.run.resume,
+                resume_path,
                 start_epoch,
                 global_step,
+            )
+        elif resume_path is not None:
+            self.tracker.logger.warning(
+                "resume path missing (%s); starting from epoch 0",
+                resume_path,
             )
 
         end_epoch = start_epoch - 1

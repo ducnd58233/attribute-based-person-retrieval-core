@@ -20,6 +20,23 @@ def _path_from_yaml(value: object) -> object:
 ConfigPath = Annotated[Path, BeforeValidator(_path_from_yaml)]
 
 
+def _resume_from_yaml(value: object) -> object:
+    """Accept null/false (off), true (auto last.pt), or a path string."""
+    if value is True:
+        return True
+    if value is False or value is None:
+        return None
+    if isinstance(value, str):
+        return Path(value)
+    return value
+
+
+# True means "resume from runs/<name>/checkpoints/last.pt" after load_config.
+ResumeSetting = Annotated[
+    Path | Literal[True] | None, BeforeValidator(_resume_from_yaml)
+]
+
+
 class StrictConfig(BaseModel):
     """Forbid silent typos and type coercion in experiment files."""
 
@@ -56,7 +73,7 @@ class OptimizationConfig(StrictConfig):
 class RunConfig(StrictConfig):
     name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
     output_dir: ConfigPath = Path("runs")
-    resume: ConfigPath | None = None
+    resume: ResumeSetting = None
     seed: int = 42
     device: DeviceName = "auto"
     progress: bool = True
@@ -75,6 +92,17 @@ def _resolve(path: Path | None, project_root: Path) -> Path | None:
     return path if path.is_absolute() else (project_root / path).resolve()
 
 
+def _resolve_resume(
+    resume: Path | Literal[True] | None,
+    output_dir: Path,
+    run_name: str,
+    root: Path,
+) -> Path | None:
+    if resume is True:
+        return (output_dir / run_name / "checkpoints" / "last.pt").resolve()
+    return _resolve(resume, root)
+
+
 def load_config(path: Path, *, project_root: Path | None = None) -> ExperimentConfig:
     """Load, validate, and resolve project-relative paths from a YAML file."""
     config_path = path.resolve()
@@ -85,10 +113,15 @@ def load_config(path: Path, *, project_root: Path | None = None) -> ExperimentCo
     )
 
     data = config.data.model_copy(update={"root": _resolve(config.data.root, root)})
+    output_dir = _resolve(config.run.output_dir, root)
+    if output_dir is None:
+        raise ValueError("run.output_dir resolved to None")
     run = config.run.model_copy(
         update={
-            "output_dir": _resolve(config.run.output_dir, root),
-            "resume": _resolve(config.run.resume, root),
+            "output_dir": output_dir,
+            "resume": _resolve_resume(
+                config.run.resume, output_dir, config.run.name, root
+            ),
         }
     )
     return config.model_copy(update={"data": data, "run": run})
