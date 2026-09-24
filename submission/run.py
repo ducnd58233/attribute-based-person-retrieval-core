@@ -95,9 +95,10 @@ def _predict_gallery(gallery: list[dict[str, Any]]) -> np.ndarray:
     device = _STATE["device"]
     if not isinstance(model, nn.Module) or not isinstance(device, torch.device):
         raise RuntimeError("Model failed to load")
+    total = len(gallery)
     batches: list[np.ndarray] = []
     with torch.inference_mode():
-        for start in range(0, len(gallery), BATCH_SIZE):
+        for start in range(0, total, BATCH_SIZE):
             chunk = gallery[start : start + BATCH_SIZE]
             tensors: list[torch.Tensor] = []
             for item in chunk:
@@ -109,6 +110,8 @@ def _predict_gallery(gallery: list[dict[str, Any]]) -> np.ndarray:
             images = torch.stack(tensors, dim=0).to(device, non_blocking=True)
             logits = model(images)
             batches.append(torch.sigmoid(logits).float().cpu().numpy())
+            done = min(start + BATCH_SIZE, total)
+            print(f"[rank_gallery] {done}/{total} gallery images processed", flush=True)
     if not batches:
         raise ValueError("Gallery is empty")
     return np.concatenate(batches, axis=0)
