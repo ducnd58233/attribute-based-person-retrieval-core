@@ -6,6 +6,7 @@ import argparse
 import json
 import shutil
 import sys
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,9 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+_ZIP_EXCLUDED_DIR_NAMES = {"__pycache__", ".git"}
+_ZIP_EXCLUDED_FILE_NAMES = {".DS_Store"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -71,6 +75,20 @@ def _export_weights(
     }
 
 
+def _zip_submission(source: Path, destination: Path) -> None:
+    """Zip source's contents, not source itself, so run.py lands at the archive root."""
+    with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED) as archive:
+        for path in sorted(source.rglob("*")):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(source)
+            if _ZIP_EXCLUDED_DIR_NAMES & set(relative.parts):
+                continue
+            if path.name in _ZIP_EXCLUDED_FILE_NAMES:
+                continue
+            archive.write(path, arcname=str(relative))
+
+
 def main() -> None:
     args = parse_args()
     template = args.template.resolve()
@@ -94,7 +112,10 @@ def main() -> None:
     (assets / "model_card.json").write_text(
         json.dumps(card, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    print(json.dumps({"out": str(out), "card": card}, indent=2))
+
+    zip_path = out.parent / f"{out.name}.zip"
+    _zip_submission(out, zip_path)
+    print(json.dumps({"out": str(out), "zip": str(zip_path), "card": card}, indent=2))
 
 
 if __name__ == "__main__":
