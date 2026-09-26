@@ -5,12 +5,17 @@ import. This exporter AST-walks those imports, emits ``%%writefile`` cells for
 collected ``src/wacv`` modules and the chosen experiment YAML, then inlines
 each stage script as a code cell (body + ``main()``, not ``runpy``). After
 eval it inlines ``scripts/visualize.py`` once (val split, label vs prediction).
-A final persist cell offers Colab ``files.download`` / Drive notes. The
+A final persist cell syncs ``runs/<run.name>/{checkpoints,submission}`` plus
+the experiment YAML to Drive (and optionally zips the same tree). The
 notebook is an on-demand artifact (not committed).
 
 Usage:
   uv run python scripts/export-colab-notebook.py \\
       --config configs/convnext_baseline.yml
+  uv run python scripts/export-colab-notebook.py \\
+      --config configs/convnext_baseline.yml --name convnext_baseline
+  uv run python scripts/export-colab-notebook.py \\
+      --config configs/convnext_baseline.yml --out notebooks/custom.ipynb
 """
 
 from __future__ import annotations
@@ -23,6 +28,8 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal
+
+import yaml
 
 ROOT: Final[Path] = Path(__file__).resolve().parents[1]
 DEFAULT_OUT: Final[Path] = ROOT / "notebooks" / "train_pipeline.ipynb"
@@ -41,8 +48,34 @@ class Stage:
     argv: tuple[str, ...]
 
 
-def stages_for_config(config_rel: str) -> tuple[Stage, ...]:
+@dataclass(frozen=True)
+class ExperimentIdentity:
+    """Run + model names read from the experiment YAML at export time."""
+
+    run_name: str
+    model_name: str
+
+
+def experiment_identity(config_path: Path) -> ExperimentIdentity:
+    """Load ``run.name`` and ``model.name`` from an experiment YAML."""
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise SystemExit(f"config is not a mapping: {config_path}")
+    try:
+        run_name = payload["run"]["name"]
+        model_name = payload["model"]["name"]
+    except (KeyError, TypeError) as exc:
+        raise SystemExit(
+            f"config missing run.name or model.name: {config_path}"
+        ) from exc
+    if not isinstance(run_name, str) or not isinstance(model_name, str):
+        raise SystemExit(f"run.name and model.name must be strings: {config_path}")
+    return ExperimentIdentity(run_name=run_name, model_name=model_name)
+
+
+def stages_for_config(config_rel: str, *, run_name: str) -> tuple[Stage, ...]:
     """Build Download/Train/Eval/Package stages with the chosen YAML baked in."""
+    best_checkpoint = f"runs/{run_name}/checkpoints/best.pt"
     return (
         Stage("## Download", Path("scripts/download-dataset.py"), ()),
         Stage(
@@ -60,7 +93,7 @@ def stages_for_config(config_rel: str) -> tuple[Stage, ...]:
             Path("scripts/package-submission.py"),
             (
                 "--checkpoint",
-                "runs/convnext-baseline/checkpoints/best.pt",
+                best_checkpoint,
                 "--config",
                 config_rel,
             ),
@@ -90,13 +123,42 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_CONFIG,
         help="Experiment YAML baked into train/eval/package cells",
     )
-    parser.add_argument(
+    out_group = parser.add_mutually_exclusive_group()
+    out_group.add_argument(
         "--out",
         type=Path,
-        default=DEFAULT_OUT,
-        help="Destination .ipynb path (local artifact; not committed)",
+        default=None,
+        help=(
+            "Full destination .ipynb path (local artifact; not committed). "
+            f"Default when neither --out nor --name: {DEFAULT_OUT.as_posix()}"
+        ),
+    )
+    out_group.add_argument(
+        "--name",
+        type=str,
+        default=None,
+        metavar="NOTEBOOK",
+        help=(
+            "Notebook file name under notebooks/ "
+            "(adds .ipynb if missing). Example: --name convnext_baseline"
+        ),
     )
     return parser.parse_args()
+
+
+def resolve_notebook_out(*, out: Path | None, name: str | None) -> Path:
+    """Resolve destination path from ``--out``, ``--name``, or the default."""
+    if name is not None:
+        filename = name if name.endswith(".ipynb") else f"{name}.ipynb"
+        if Path(filename).name != filename:
+            raise SystemExit(
+                f"--name must be a file name, not a path: {name!r} "
+                "(use --out for a full path)"
+            )
+        return resolve_path(Path("notebooks") / filename)
+    if out is not None:
+        return resolve_path(out)
+    return resolve_path(DEFAULT_OUT)
 
 
 def resolve_path(path: Path) -> Path:
@@ -238,34 +300,90 @@ def inline_stage_cell(script_text: str, argv0: str, argv: Sequence[str]) -> Cell
     return Cell(kind="code", source=body + footer)
 
 
-def persist_checkpoints_cell() -> Cell:
+def persist_checkpoints_cell(
+    *, config_rel: str, run_name: str, model_name: str
+) -> Cell:
+    """Sync checkpoints + submission + config under ``runs/<run_name>/`` on Drive."""
     return Cell(
         kind="code",
         source=(
-            "# Colab VM disk is ephemeral - download or copy to Drive.\n"
+            "# Colab VM disk is ephemeral. Prefer Drive (works from Cursor/VS Code\n"
+            "# Colab); browser download is a silent no-op on that path.\n"
+            "#\n"
+            "# Drive layout:\n"
+            "#   MyDrive/wacv-upar-checkpoints/runs/<run_name>/\n"
+            "#     checkpoints/   (best.pt, last.pt, ...)\n"
+            "#     submission/    (build/submission)\n"
+            "#     <config yaml>  (experiment config used for this run)\n"
             "import shutil\n"
             "from pathlib import Path\n"
             "\n"
-            "candidates = [\n"
-            "    Path('runs/convnext-baseline/checkpoints/best.pt'),\n"
-            "    Path('runs/convnext-baseline/checkpoints/last.pt'),\n"
-            "    Path('build/submission'),\n"
-            "]\n"
-            "existing = [p for p in candidates if p.exists()]\n"
-            "print('Found:', existing)\n"
+            f"RUN_NAME = {run_name!r}\n"
+            f"MODEL_NAME = {model_name!r}\n"
+            f"CONFIG_REL = Path({config_rel!r})\n"
+            "RUN_DIR = Path('runs') / RUN_NAME\n"
+            "CKPT_SRC = RUN_DIR / 'checkpoints'\n"
+            "SUBMISSION_SRC = Path('build/submission')\n"
+            "\n"
+            "print(f'run={RUN_NAME} model={MODEL_NAME} config={CONFIG_REL}')\n"
+            "\n"
+            "\n"
+            "def _replace_copy(src: Path, dest: Path) -> None:\n"
+            "    if dest.exists():\n"
+            "        if dest.is_dir():\n"
+            "            shutil.rmtree(dest)\n"
+            "        else:\n"
+            "            dest.unlink()\n"
+            "    dest.parent.mkdir(parents=True, exist_ok=True)\n"
+            "    if src.is_dir():\n"
+            "        shutil.copytree(src, dest)\n"
+            "    else:\n"
+            "        shutil.copy2(src, dest)\n"
+            "\n"
+            "\n"
+            "def sync_run_tree(base: Path) -> list[Path]:\n"
+            '    """Write base/runs/<run_name>/{checkpoints,submission} + config."""\n'
+            "    run_dest = base / 'runs' / RUN_NAME\n"
+            "    if run_dest.exists():\n"
+            "        shutil.rmtree(run_dest)\n"
+            "    run_dest.mkdir(parents=True)\n"
+            "    copied: list[Path] = []\n"
+            "    if CKPT_SRC.is_dir():\n"
+            "        _replace_copy(CKPT_SRC, run_dest / 'checkpoints')\n"
+            "        copied.append(run_dest / 'checkpoints')\n"
+            "    if SUBMISSION_SRC.is_dir():\n"
+            "        _replace_copy(SUBMISSION_SRC, run_dest / 'submission')\n"
+            "        copied.append(run_dest / 'submission')\n"
+            "    if CONFIG_REL.is_file():\n"
+            "        cfg_dest = run_dest / CONFIG_REL.name\n"
+            "        shutil.copy2(CONFIG_REL, cfg_dest)\n"
+            "        copied.append(cfg_dest)\n"
+            "    return copied\n"
+            "\n"
+            "\n"
+            "copied: list[Path] = []\n"
+            "try:\n"
+            "    from google.colab import drive  # type: ignore[import-not-found]\n"
+            "\n"
+            "    drive.mount('/content/drive')\n"
+            "    drive_root = Path('/content/drive/MyDrive/wacv-upar-checkpoints')\n"
+            "    drive_root.mkdir(parents=True, exist_ok=True)\n"
+            "    copied = sync_run_tree(drive_root)\n"
+            "    print('Drive root:', drive_root)\n"
+            "    for path in copied:\n"
+            "        print(' ', path)\n"
+            "    drive.flush_and_unmount()\n"
+            "except ImportError:\n"
+            "    print('Not Colab; skip Drive mount.')\n"
+            "\n"
+            "staging = Path('wacv_artifacts')\n"
+            "if staging.exists():\n"
+            "    shutil.rmtree(staging)\n"
+            "local_copied = sync_run_tree(staging)\n"
+            "print('Local staging:', local_copied)\n"
             "\n"
             "archive = None\n"
-            "if existing:\n"
-            "    staging = Path('wacv_artifacts')\n"
-            "    if staging.exists():\n"
-            "        shutil.rmtree(staging)\n"
-            "    staging.mkdir()\n"
-            "    for path in existing:\n"
-            "        dest = staging / path.name\n"
-            "        if path.is_dir():\n"
-            "            shutil.copytree(path, dest)\n"
-            "        else:\n"
-            "            shutil.copy2(path, dest)\n"
+            "if local_copied:\n"
             "    archive = Path(\n"
             "        shutil.make_archive('wacv_artifacts', 'zip', staging)\n"
             "    )\n"
@@ -278,33 +396,17 @@ def persist_checkpoints_cell() -> Cell:
             "        print('Downloading', archive)\n"
             "        files.download(str(archive))\n"
             "except ImportError:\n"
-            "    print('Not Colab; files remain on local disk at the paths above.')\n"
+            "    print('Not Colab; zip (if any) remains on local disk.')\n"
             "\n"
-            "# files.download() above is a silent no-op when this Colab runtime is\n"
-            "# reached through the VS Code/Cursor Colab extension rather than the\n"
-            "# colab.research.google.com web UI (googlecolab/colab-vscode#267) --\n"
-            "# it does not raise, it just does nothing. FileLink instead renders an\n"
-            "# HTML anchor via core Jupyter display, which VS Code's Jupyter/Colab\n"
-            "# integration can save from, so offer it either way.\n"
             "if archive is not None:\n"
             "    from IPython.display import FileLink, display\n"
             "\n"
             "    print(\n"
-            "        'If no browser download started above (common when '\n"
-            "        'connecting through VS Code or Cursor rather than '\n"
-            "        'colab.research.google.com), use this link instead:'\n"
+            "        'If no browser download started '\n"
+            "        '(common in Cursor/VS Code Colab), '\n"
+            "        'use Drive above or this link from the web Colab UI:'\n"
             "    )\n"
             "    display(FileLink(str(archive)))\n"
-            "\n"
-            "# Optional persistence on Drive (better for multi-GB checkpoints):\n"
-            "# from google.colab import drive\n"
-            "# drive.mount('/content/drive')\n"
-            "# dest = Path('/content/drive/MyDrive/wacv-upar-checkpoints')\n"
-            "# dest.mkdir(parents=True, exist_ok=True)\n"
-            "# for path in existing:\n"
-            "#     if path.is_file():\n"
-            "#         shutil.copy2(path, dest / path.name)\n"
-            "# drive.flush_and_unmount()\n"
         ),
     )
 
@@ -375,17 +477,18 @@ def submission_template_cells(
 
 
 def build_cells(root: Path, *, config_rel: str) -> list[Cell]:
-    stages = stages_for_config(config_rel)
+    config_path = resolve_path(Path(config_rel))
+    if not config_path.is_file():
+        raise SystemExit(f"missing config: {config_path}")
+    identity = experiment_identity(config_path)
+
+    stages = stages_for_config(config_rel, run_name=identity.run_name)
     visualize = visualize_stage(config_rel, split="val", limit=4)
     scripts = [resolve_path(stage.script) for stage in stages]
     scripts.append(resolve_path(visualize.script))
     for script in scripts:
         if not script.is_file():
             raise SystemExit(f"missing pipeline script: {script}")
-
-    config_path = resolve_path(Path(config_rel))
-    if not config_path.is_file():
-        raise SystemExit(f"missing config: {config_path}")
 
     src_files = collect_src_files(scripts, root)
     if not src_files:
@@ -479,7 +582,13 @@ def build_cells(root: Path, *, config_rel: str) -> list[Cell]:
             )
 
     cells.append(Cell(kind="markdown", source="## Persist checkpoints"))
-    cells.append(persist_checkpoints_cell())
+    cells.append(
+        persist_checkpoints_cell(
+            config_rel=config_rel,
+            run_name=identity.run_name,
+            model_name=identity.model_name,
+        )
+    )
     return cells
 
 
@@ -553,7 +662,7 @@ def write_notebook(out: Path, *, root: Path = ROOT, config_rel: str) -> None:
 
 def main() -> None:
     args = parse_args()
-    out = resolve_path(args.out)
+    out = resolve_notebook_out(out=args.out, name=args.name)
     config_rel = config_relpath(args.config, ROOT)
     if LEGACY_PIPELINE_PY.is_file():
         LEGACY_PIPELINE_PY.unlink()

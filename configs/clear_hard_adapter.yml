@@ -1,0 +1,42 @@
+model:
+  name: convnext_base
+  pretrained: true
+  dropout: 0.1
+  hard_query_adapter: true
+  adapter_dim: 256
+
+data:
+  root: data
+  batch_size: 32
+  num_workers: 4
+  limit: null
+  train_augmentation: true
+
+optimization:
+  epochs: 12
+  learning_rate: 0.00005
+  weight_decay: 0.01
+  pos_weight_clip: 10.0
+  amp: true
+  grad_clip_norm: 1.0
+  ema_decay: 0.999
+  scheduler_factor: 0.1
+  scheduler_patience: 3
+  label_smoothing: 0.05
+  focal_gamma: 2.0
+  query_match_weight: 0.5
+  query_match_temperature: 0.07
+
+ranking:
+  distance: clear_hard
+  temperature: 1.5
+  clear_fusion: 0.5
+
+run:
+  name: clear-hard-adapter-ft
+  output_dir: runs
+  resume: false
+  init_weights: runs/convnext-baseline/best.pt
+  seed: 42
+  device: auto
+  progress: true
