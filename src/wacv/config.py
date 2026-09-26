@@ -15,6 +15,7 @@ DistanceName = Literal[
     "l1", "specker", "clear_hard", "nll", "hybrid", "group_categorical"
 ]
 GroupMode = Literal["independent", "categorical"]
+CalibrationMode = Literal["none", "per_attribute"]
 DomainName = Literal["PA100k", "PETA", "Market1501"]
 EvalProtocol = Literal["id_val", "lodo_m"]
 
@@ -109,6 +110,11 @@ class RankingConfig(StrictConfig):
         default="independent",
         description="When categorical, exclusive groups use categorical NLL "
         "(multi-hot falls back to Bernoulli).",
+    )
+    calibration: CalibrationMode = Field(
+        default="none",
+        description="per_attribute fits one temperature per bit on ID-val "
+        "(or in-domain val for LODO-M) and stores assets/calibration.json.",
     )
     clear_fusion: float = Field(
         default=0.5,

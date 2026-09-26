@@ -21,6 +21,7 @@ from torchvision.models import convnext_base, convnext_tiny, resnet50
 HERE = Path(__file__).resolve().parent
 WEIGHTS_PATH = HERE / "assets" / "model.pt"
 CARD_PATH = HERE / "assets" / "model_card.json"
+CALIBRATION_PATH = HERE / "assets" / "calibration.json"
 BATCH_SIZE = 64
 _PROB_EPS = 1e-4
 
@@ -252,6 +253,25 @@ def _specker_distance(
     return clipped.sum(1)[None, :] + queries @ (1.0 - 2.0 * clipped).T
 
 
+def _apply_per_attribute_temperatures(
+    probabilities: np.ndarray, temperatures: np.ndarray
+) -> np.ndarray:
+    clipped = np.clip(probabilities.astype(np.float32), _PROB_EPS, 1.0 - _PROB_EPS)
+    logits = np.log(clipped) - np.log1p(-clipped)
+    scaled = logits / np.maximum(temperatures.astype(np.float32)[None, :], 1e-3)
+    return 1.0 / (1.0 + np.exp(-scaled))
+
+
+def _load_calibration_temperatures() -> np.ndarray | None:
+    if not CALIBRATION_PATH.is_file():
+        return None
+    payload = json.loads(CALIBRATION_PATH.read_text(encoding="utf-8"))
+    temps = payload.get("temperatures")
+    if not isinstance(temps, list) or not temps:
+        return None
+    return np.asarray(temps, dtype=np.float32)
+
+
 def _nll_distance(
     queries: np.ndarray, probabilities: np.ndarray, temperature: float
 ) -> np.ndarray:
@@ -373,6 +393,11 @@ def rank_gallery(sample: dict[str, Any]) -> dict[str, Any]:
     card = _STATE["card"] if isinstance(_STATE["card"], dict) else {}
     distance_name = str(card.get("ranking_distance", "l1"))
     temperature = float(card.get("ranking_temperature", 1.5))
+    if str(card.get("ranking_calibration", "none")) == "per_attribute":
+        temps = _load_calibration_temperatures()
+        if temps is not None and temps.shape[0] == probabilities.shape[1]:
+            probabilities = _apply_per_attribute_temperatures(probabilities, temps)
+            temperature = 1.0
     if distance_name == "clear_hard":
         load_model()
         model = _STATE["model"]

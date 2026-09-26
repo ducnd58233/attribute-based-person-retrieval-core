@@ -78,6 +78,7 @@ def _export_weights(
         "ranking_temperature": float(config.ranking.temperature),
         "ranking_alpha": float(config.ranking.alpha),
         "ranking_group_mode": config.ranking.group_mode,
+        "ranking_calibration": config.ranking.calibration,
         "clear_fusion": float(config.ranking.clear_fusion),
     }
 
@@ -116,6 +117,15 @@ def main() -> None:
     assets = out / "assets"
     assets.mkdir()
     card = _export_weights(args.checkpoint, args.config, assets / "model.pt")
+    from src.wacv.config import load_config as _load_config
+
+    packed_config = _load_config(args.config)
+    calib_candidate = (
+        packed_config.run.output_dir / packed_config.run.name / "calibration.json"
+    )
+    if calib_candidate.is_file():
+        shutil.copy2(calib_candidate, assets / "calibration.json")
+        card["ranking_calibration"] = "per_attribute"
     (assets / "model_card.json").write_text(
         json.dumps(card, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )

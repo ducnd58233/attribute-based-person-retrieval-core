@@ -108,10 +108,13 @@ def _evaluate_protocol(
     queries: np.ndarray,
     attribute_names: tuple[str, ...],
     distance: str,
+    calibration_out: Path | None = None,
 ) -> dict[str, float]:
     from src.wacv.data import AttributeDataset
     from src.wacv.engine import resolve_num_workers
     from src.wacv.evaluation import (
+        apply_per_attribute_temperatures,
+        fit_per_attribute_temperatures,
         mean_accuracy,
         predict_probabilities,
         ranking_distance,
@@ -133,6 +136,28 @@ def _evaluate_protocol(
         model, loader, device, progress=config.run.progress
     )
     attributes = ground_truth[list(attribute_names)].to_numpy(dtype=np.int64)
+    score_temperature = float(config.ranking.temperature)
+    score_probabilities = probabilities
+    if config.ranking.calibration == "per_attribute":
+        temperatures = fit_per_attribute_temperatures(probabilities, attributes)
+        score_probabilities = apply_per_attribute_temperatures(
+            probabilities, temperatures
+        )
+        score_temperature = 1.0
+        if calibration_out is not None:
+            calibration_out.parent.mkdir(parents=True, exist_ok=True)
+            calibration_out.write_text(
+                json.dumps(
+                    {
+                        "mode": "per_attribute",
+                        "temperatures": [float(t) for t in temperatures.tolist()],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
     gallery_embeddings = None
     query_embeddings = None
     if distance == "clear_hard":
@@ -148,9 +173,9 @@ def _evaluate_protocol(
         attributes,
         ranking_distance(
             queries,
-            probabilities,
+            score_probabilities,
             distance=distance,
-            temperature=config.ranking.temperature,
+            temperature=score_temperature,
             alpha=config.ranking.alpha,
             gallery_embeddings=gallery_embeddings,
             query_embeddings=query_embeddings,
@@ -212,8 +237,14 @@ def evaluate_checkpoint(
     load_model_weights(checkpoint.resolve(), model, map_location=device)
 
     results: dict[str, dict[str, float]] = {}
+    run_dir = config.run.output_dir / config.run.name
     for protocol in protocols:
         ground_truth, queries, names = _prepare_protocol_data(config, protocol)
+        calibration_path = None
+        if config.ranking.calibration == "per_attribute":
+            calibration_path = run_dir / f"calibration_{protocol}.json"
+            if protocol == "id_val":
+                calibration_path = run_dir / "calibration.json"
         results[protocol] = _evaluate_protocol(
             config=config,
             model=model,
@@ -222,6 +253,7 @@ def evaluate_checkpoint(
             queries=queries,
             attribute_names=names,
             distance=distance_name,
+            calibration_out=calibration_path,
         )
     return results, config
 
