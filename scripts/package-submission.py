@@ -79,6 +79,8 @@ def _export_weights(
         "ranking_alpha": float(config.ranking.alpha),
         "ranking_group_mode": config.ranking.group_mode,
         "ranking_calibration": config.ranking.calibration,
+        "ranking_query_norm": config.ranking.query_norm,
+        "ranking_query_norm_tau": float(config.ranking.query_norm_tau),
         "clear_fusion": float(config.ranking.clear_fusion),
     }
 

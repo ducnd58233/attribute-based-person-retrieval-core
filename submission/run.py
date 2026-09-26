@@ -386,18 +386,29 @@ def _clear_hard_distance(
     return (1.0 - fusion) * specker + fusion * cosine_distance
 
 
-def rank_gallery(sample: dict[str, Any]) -> dict[str, Any]:
-    """Return distances between query vectors and gallery probabilities."""
-    probabilities = _predict_gallery(sample["gallery"])
-    queries = np.asarray(sample["queries"], dtype=np.float32)
-    card = _STATE["card"] if isinstance(_STATE["card"], dict) else {}
+def _dual_softmax_rerank(distances: np.ndarray, tau: float) -> np.ndarray:
+    """S' = S + log_softmax_queries(S/tau); return -S'. No labels / updates."""
+    similarities = -distances.astype(np.float64)
+    scale = max(float(tau), 1e-8)
+    scaled = similarities / scale
+    row_max = scaled.max(axis=0, keepdims=True)
+    exp_shifted = np.exp(scaled - row_max)
+    log_partition = np.log(np.maximum(exp_shifted.sum(axis=0, keepdims=True), 1e-12))
+    log_softmax = scaled - row_max - log_partition
+    adjusted = similarities + log_softmax
+    return (-adjusted).astype(np.float32)
+
+
+def _score_gallery_distances(
+    queries: np.ndarray,
+    probabilities: np.ndarray,
+    card: dict[str, Any],
+    *,
+    temperature: float,
+    gallery: list[Any],
+) -> np.ndarray:
+    """Dispatch the configured distance; clear_hard may touch ``gallery``."""
     distance_name = str(card.get("ranking_distance", "l1"))
-    temperature = float(card.get("ranking_temperature", 1.5))
-    if str(card.get("ranking_calibration", "none")) == "per_attribute":
-        temps = _load_calibration_temperatures()
-        if temps is not None and temps.shape[0] == probabilities.shape[1]:
-            probabilities = _apply_per_attribute_temperatures(probabilities, temps)
-            temperature = 1.0
     if distance_name == "clear_hard":
         load_model()
         model = _STATE["model"]
@@ -406,7 +417,7 @@ def rank_gallery(sample: dict[str, Any]) -> dict[str, Any]:
             raise TypeError("clear_hard requires hard_query_adapter")
         if not isinstance(device, torch.device):
             raise RuntimeError("Model failed to load")
-        gallery_embeddings = _predict_gallery_embeddings(sample["gallery"])
+        gallery_embeddings = _predict_gallery_embeddings(gallery)
         with torch.inference_mode():
             query_embeddings = (
                 model.query_embeddings(
@@ -416,7 +427,7 @@ def rank_gallery(sample: dict[str, Any]) -> dict[str, Any]:
                 .cpu()
                 .numpy()
             )
-        distances = _clear_hard_distance(
+        return _clear_hard_distance(
             queries,
             probabilities,
             gallery_embeddings,
@@ -424,24 +435,45 @@ def rank_gallery(sample: dict[str, Any]) -> dict[str, Any]:
             temperature=temperature,
             clear_fusion=float(card.get("clear_fusion", 0.5)),
         )
-    elif distance_name == "specker":
-        distances = _specker_distance(queries, probabilities, temperature)
-    elif distance_name == "nll":
-        if str(card.get("ranking_group_mode", "independent")) == "categorical":
-            distances = _group_categorical_nll_distance(
-                queries, probabilities, temperature
-            )
-        else:
-            distances = _nll_distance(queries, probabilities, temperature)
-    elif distance_name == "group_categorical":
-        distances = _group_categorical_nll_distance(queries, probabilities, temperature)
-    elif distance_name == "hybrid":
-        distances = _hybrid_distance(
+    if distance_name == "specker":
+        return _specker_distance(queries, probabilities, temperature)
+    if distance_name in {"nll", "group_categorical"}:
+        use_groups = distance_name == "group_categorical" or (
+            str(card.get("ranking_group_mode", "independent")) == "categorical"
+        )
+        if use_groups:
+            return _group_categorical_nll_distance(queries, probabilities, temperature)
+        return _nll_distance(queries, probabilities, temperature)
+    if distance_name == "hybrid":
+        return _hybrid_distance(
             queries,
             probabilities,
             temperature,
             float(card.get("ranking_alpha", 0.5)),
         )
-    else:
-        distances = _l1_distance(queries, probabilities)
+    return _l1_distance(queries, probabilities)
+
+
+def rank_gallery(sample: dict[str, Any]) -> dict[str, Any]:
+    """Return distances between query vectors and gallery probabilities."""
+    probabilities = _predict_gallery(sample["gallery"])
+    queries = np.asarray(sample["queries"], dtype=np.float32)
+    card = _STATE["card"] if isinstance(_STATE["card"], dict) else {}
+    temperature = float(card.get("ranking_temperature", 1.5))
+    if str(card.get("ranking_calibration", "none")) == "per_attribute":
+        temps = _load_calibration_temperatures()
+        if temps is not None and temps.shape[0] == probabilities.shape[1]:
+            probabilities = _apply_per_attribute_temperatures(probabilities, temps)
+            temperature = 1.0
+    distances = _score_gallery_distances(
+        queries,
+        probabilities,
+        card,
+        temperature=temperature,
+        gallery=sample["gallery"],
+    )
+    if str(card.get("ranking_query_norm", "none")) == "dual_softmax":
+        distances = _dual_softmax_rerank(
+            distances, float(card.get("ranking_query_norm_tau", 0.05))
+        )
     return {"distances": distances}

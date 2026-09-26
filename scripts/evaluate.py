@@ -114,6 +114,7 @@ def _evaluate_protocol(
     from src.wacv.engine import resolve_num_workers
     from src.wacv.evaluation import (
         apply_per_attribute_temperatures,
+        dual_softmax_rerank,
         fit_per_attribute_temperatures,
         mean_accuracy,
         predict_probabilities,
@@ -168,19 +169,24 @@ def _evaluate_protocol(
             device,
             progress=config.run.progress,
         )
+    distances = ranking_distance(
+        queries,
+        score_probabilities,
+        distance=distance,
+        temperature=score_temperature,
+        alpha=config.ranking.alpha,
+        gallery_embeddings=gallery_embeddings,
+        query_embeddings=query_embeddings,
+        clear_fusion=config.ranking.clear_fusion,
+    )
+    if config.ranking.query_norm == "dual_softmax":
+        distances = dual_softmax_rerank(
+            distances, tau=float(config.ranking.query_norm_tau)
+        )
     metrics = evaluate_ranking(
         queries,
         attributes,
-        ranking_distance(
-            queries,
-            score_probabilities,
-            distance=distance,
-            temperature=score_temperature,
-            alpha=config.ranking.alpha,
-            gallery_embeddings=gallery_embeddings,
-            query_embeddings=query_embeddings,
-            clear_fusion=config.ranking.clear_fusion,
-        ),
+        distances,
     )
     metrics["mA"] = mean_accuracy(probabilities, attributes)
     wall_seconds = time.perf_counter() - started

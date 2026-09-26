@@ -494,6 +494,29 @@ register_scorer("hybrid", _score_hybrid)
 register_scorer("group_categorical", _score_group_categorical)
 
 
+def dual_softmax_rerank(
+    distances: np.ndarray,
+    *,
+    tau: float = 0.05,
+) -> np.ndarray:
+    """Query-set dual softmax over gallery columns (no labels, no updates).
+
+    Converts distances ``D`` to similarities ``S = -D``, then
+    ``S' = S + log_softmax_{queries}(S / tau)`` and returns ``-S'`` as a
+    distance. Softmax is column-wise (over queries for each gallery image),
+    which dampens hubness without using ground-truth matches.
+    """
+    similarities = -distances.astype(np.float64)
+    scale = max(float(tau), 1e-8)
+    scaled = similarities / scale
+    row_max = scaled.max(axis=0, keepdims=True)
+    exp_shifted = np.exp(scaled - row_max)
+    log_partition = np.log(np.maximum(exp_shifted.sum(axis=0, keepdims=True), 1e-12))
+    log_softmax = scaled - row_max - log_partition
+    adjusted = similarities + log_softmax
+    return (-adjusted).astype(np.float32)
+
+
 def mean_accuracy(probabilities: np.ndarray, targets: np.ndarray) -> float:
     predictions = probabilities >= 0.5
     positives = targets == 1

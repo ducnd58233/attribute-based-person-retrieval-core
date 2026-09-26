@@ -16,6 +16,7 @@ DistanceName = Literal[
 ]
 GroupMode = Literal["independent", "categorical"]
 CalibrationMode = Literal["none", "per_attribute"]
+QueryNorm = Literal["none", "dual_softmax"]
 DomainName = Literal["PA100k", "PETA", "Market1501"]
 EvalProtocol = Literal["id_val", "lodo_m"]
 
@@ -115,6 +116,15 @@ class RankingConfig(StrictConfig):
         default="none",
         description="per_attribute fits one temperature per bit on ID-val "
         "(or in-domain val for LODO-M) and stores assets/calibration.json.",
+    )
+    query_norm: QueryNorm = Field(
+        default="none",
+        description="dual_softmax: S' = S + log_softmax over queries per gallery "
+        "(no labels; InfoNCE-style hubness reduction).",
+    )
+    query_norm_tau: PositiveFloat = Field(
+        default=0.05,
+        description="Temperature for dual_softmax column softmax.",
     )
     clear_fusion: float = Field(
         default=0.5,
