@@ -77,6 +77,7 @@ def _export_weights(
         "ranking_distance": config.ranking.distance,
         "ranking_temperature": float(config.ranking.temperature),
         "ranking_alpha": float(config.ranking.alpha),
+        "ranking_group_mode": config.ranking.group_mode,
         "clear_fusion": float(config.ranking.clear_fusion),
     }
 

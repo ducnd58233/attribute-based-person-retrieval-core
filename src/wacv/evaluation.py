@@ -10,9 +10,21 @@ import torch
 from torch import nn
 from tqdm import tqdm
 
+from src.wacv.attributes import (
+    ExclusiveAttributeGroup,
+    exclusive_attribute_groups,
+    independent_attribute_indices,
+)
 from src.wacv.query_adapter import AttributeModelWithHardQuery
 
-DistanceName = Literal["l1", "specker", "clear_hard", "nll", "hybrid"]
+DistanceName = Literal[
+    "l1",
+    "specker",
+    "clear_hard",
+    "nll",
+    "hybrid",
+    "group_categorical",
+]
 _PROB_EPS = 1e-4
 
 Scorer = Callable[..., np.ndarray]
@@ -190,6 +202,81 @@ def nll_distance(
     return -(query_values @ logits.T) - log_1mp.sum(axis=1)[None, :]
 
 
+def _bernoulli_nll_bits(
+    queries: np.ndarray, calibrated: np.ndarray, indices: tuple[int, ...]
+) -> np.ndarray:
+    """Bernoulli NLL restricted to ``indices`` (already calibrated probs)."""
+    if not indices:
+        return np.zeros((queries.shape[0], calibrated.shape[0]), dtype=np.float32)
+    idx = list(indices)
+    query_bits = queries[:, idx].astype(np.float32)
+    probs = calibrated[:, idx]
+    log_p = np.log(probs)
+    log_1mp = np.log(1.0 - probs)
+    logits = log_p - log_1mp
+    return (-(query_bits @ logits.T) - log_1mp.sum(axis=1)[None, :]).astype(np.float32)
+
+
+def _group_categorical_term(
+    queries: np.ndarray,
+    calibrated: np.ndarray,
+    group: ExclusiveAttributeGroup,
+) -> np.ndarray:
+    """Categorical NLL for one exclusive group; multi-hot falls back to Bernoulli."""
+    idx = list(group.indices)
+    query_bits = queries[:, idx].astype(np.float32)
+    group_probs = calibrated[:, idx]
+    if group.has_none:
+        none_mass = np.clip(
+            1.0 - group_probs.sum(axis=1, keepdims=True), _PROB_EPS, 1.0
+        )
+        extended_probs = np.concatenate([group_probs, none_mass], axis=1)
+        none_query = (query_bits.sum(axis=1, keepdims=True) == 0).astype(np.float32)
+        extended_queries = np.concatenate([query_bits, none_query], axis=1)
+    else:
+        extended_probs = group_probs
+        extended_queries = query_bits
+
+    row_sum = np.maximum(extended_probs.sum(axis=1, keepdims=True), _PROB_EPS)
+    renorm = np.clip(extended_probs / row_sum, _PROB_EPS, 1.0)
+    log_renorm = np.log(renorm)
+    categorical = -(extended_queries @ log_renorm.T)
+    bernoulli = _bernoulli_nll_bits(queries, calibrated, group.indices)
+
+    ones = extended_queries.sum(axis=1) == 1.0
+    multi = extended_queries.sum(axis=1) > 1.0
+    zero = extended_queries.sum(axis=1) == 0.0
+    use_categorical = ones
+    use_bernoulli = multi | (zero & (not group.has_none))
+    return (
+        np.where(use_categorical[:, None], categorical, 0.0)
+        + np.where(use_bernoulli[:, None], bernoulli, 0.0)
+    ).astype(np.float32)
+
+
+def group_categorical_nll_distance(
+    queries: np.ndarray,
+    probabilities: np.ndarray,
+    *,
+    temperature: float = 1.0,
+) -> np.ndarray:
+    """Group-categorical NLL plus Bernoulli NLL on independent attributes.
+
+    Exclusive groups (Age, Hair+none, Upper/Lower colour, Lower type) are
+    renormalised to a simplex and scored with categorical log-likelihood when
+    the query selects exactly one category. Multi-hot group queries fall back
+    to Bernoulli NLL on that group's bits.
+    """
+    calibrated = _calibrate_probabilities(probabilities, temperature)
+    num_attributes = calibrated.shape[1]
+    distance = np.zeros((queries.shape[0], calibrated.shape[0]), dtype=np.float32)
+    for group in exclusive_attribute_groups():
+        distance += _group_categorical_term(queries, calibrated, group)
+    independent = independent_attribute_indices(num_attributes)
+    distance += _bernoulli_nll_bits(queries, calibrated, independent)
+    return distance
+
+
 def _minmax_per_query(distances: np.ndarray) -> np.ndarray:
     """Scale each query row to [0, 1]; constant rows become zeros."""
     row_min = distances.min(axis=1, keepdims=True)
@@ -306,11 +393,24 @@ def _score_hybrid(
     return hybrid_distance(queries, probabilities, alpha=alpha, temperature=temperature)
 
 
+def _score_group_categorical(
+    queries: np.ndarray,
+    probabilities: np.ndarray,
+    *,
+    temperature: float = 1.0,
+    **_: object,
+) -> np.ndarray:
+    return group_categorical_nll_distance(
+        queries, probabilities, temperature=temperature
+    )
+
+
 register_scorer("l1", _score_l1)
 register_scorer("specker", _score_specker)
 register_scorer("clear_hard", _score_clear_hard)
 register_scorer("nll", _score_nll)
 register_scorer("hybrid", _score_hybrid)
+register_scorer("group_categorical", _score_group_categorical)
 
 
 def mean_accuracy(probabilities: np.ndarray, targets: np.ndarray) -> float:

@@ -265,6 +265,69 @@ def _nll_distance(
     return -(queries @ logits.T) - log_1mp.sum(axis=1)[None, :]
 
 
+_EXCLUSIVE_GROUPS: tuple[tuple[tuple[int, ...], bool], ...] = (
+    ((0, 1, 2), False),
+    ((4, 5, 6), True),
+    (tuple(range(8, 20)), False),
+    (tuple(range(21, 33)), False),
+    ((33, 34), False),
+)
+
+
+def _bernoulli_nll_bits(
+    queries: np.ndarray, calibrated: np.ndarray, indices: tuple[int, ...]
+) -> np.ndarray:
+    if not indices:
+        return np.zeros((queries.shape[0], calibrated.shape[0]), dtype=np.float32)
+    idx = list(indices)
+    query_bits = queries[:, idx].astype(np.float32)
+    probs = calibrated[:, idx]
+    log_p = np.log(probs)
+    log_1mp = np.log(1.0 - probs)
+    logits = log_p - log_1mp
+    return (-(query_bits @ logits.T) - log_1mp.sum(axis=1)[None, :]).astype(np.float32)
+
+
+def _group_categorical_nll_distance(
+    queries: np.ndarray, probabilities: np.ndarray, temperature: float
+) -> np.ndarray:
+    clipped = np.clip(probabilities.astype(np.float32), _PROB_EPS, 1.0 - _PROB_EPS)
+    if temperature != 1.0:
+        logits = np.log(clipped) - np.log1p(-clipped)
+        clipped = 1.0 / (1.0 + np.exp(-(logits / float(temperature))))
+    distance = np.zeros((queries.shape[0], clipped.shape[0]), dtype=np.float32)
+    covered: set[int] = set()
+    for indices, has_none in _EXCLUSIVE_GROUPS:
+        covered.update(indices)
+        idx = list(indices)
+        query_bits = queries[:, idx].astype(np.float32)
+        group_probs = clipped[:, idx]
+        if has_none:
+            none_mass = np.clip(
+                1.0 - group_probs.sum(axis=1, keepdims=True), _PROB_EPS, 1.0
+            )
+            extended_probs = np.concatenate([group_probs, none_mass], axis=1)
+            none_query = (query_bits.sum(axis=1, keepdims=True) == 0).astype(np.float32)
+            extended_queries = np.concatenate([query_bits, none_query], axis=1)
+        else:
+            extended_probs = group_probs
+            extended_queries = query_bits
+        row_sum = np.maximum(extended_probs.sum(axis=1, keepdims=True), _PROB_EPS)
+        renorm = np.clip(extended_probs / row_sum, _PROB_EPS, 1.0)
+        categorical = -(extended_queries @ np.log(renorm).T)
+        bernoulli = _bernoulli_nll_bits(queries, clipped, indices)
+        ones = extended_queries.sum(axis=1) == 1.0
+        multi = extended_queries.sum(axis=1) > 1.0
+        zero = extended_queries.sum(axis=1) == 0.0
+        distance += (
+            np.where(ones[:, None], categorical, 0.0)
+            + np.where((multi | (zero & (not has_none)))[:, None], bernoulli, 0.0)
+        ).astype(np.float32)
+    independent = tuple(i for i in range(clipped.shape[1]) if i not in covered)
+    distance += _bernoulli_nll_bits(queries, clipped, independent)
+    return distance
+
+
 def _minmax_per_query(distances: np.ndarray) -> np.ndarray:
     row_min = distances.min(axis=1, keepdims=True)
     row_max = distances.max(axis=1, keepdims=True)
@@ -339,7 +402,14 @@ def rank_gallery(sample: dict[str, Any]) -> dict[str, Any]:
     elif distance_name == "specker":
         distances = _specker_distance(queries, probabilities, temperature)
     elif distance_name == "nll":
-        distances = _nll_distance(queries, probabilities, temperature)
+        if str(card.get("ranking_group_mode", "independent")) == "categorical":
+            distances = _group_categorical_nll_distance(
+                queries, probabilities, temperature
+            )
+        else:
+            distances = _nll_distance(queries, probabilities, temperature)
+    elif distance_name == "group_categorical":
+        distances = _group_categorical_nll_distance(queries, probabilities, temperature)
     elif distance_name == "hybrid":
         distances = _hybrid_distance(
             queries,
