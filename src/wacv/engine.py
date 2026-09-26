@@ -20,8 +20,15 @@ from tqdm.contrib.logging import logging_redirect_tqdm
 
 from src.wacv.checkpoint import CheckpointManager
 from src.wacv.config import DeviceName, ExperimentConfig
-from src.wacv.evaluation import l1_distance, mean_accuracy, predict_probabilities
+from src.wacv.evaluation import (
+    mean_accuracy,
+    predict_gallery_embeddings,
+    predict_probabilities,
+    ranking_distance,
+)
+from src.wacv.losses import hard_query_infonce
 from src.wacv.metrics import evaluate_ranking
+from src.wacv.query_adapter import AttributeModelWithHardQuery
 from src.wacv.tracking import RunTracker
 
 BatchIterable = Iterable[tuple[torch.Tensor, torch.Tensor]]
@@ -109,6 +116,47 @@ class Trainer:
             model, optimizer, scheduler, self.scaler, self.ema_model, config
         )
 
+    def _batch_training_loss(
+        self, batch_images: torch.Tensor, batch_targets: torch.Tensor
+    ) -> torch.Tensor:
+        smoothing = self.config.optimization.label_smoothing
+        loss_targets = batch_targets * (1.0 - smoothing) + 0.5 * smoothing
+        logits = self.model(batch_images)
+        loss = self.criterion(logits, loss_targets)
+        match_weight = self.config.optimization.query_match_weight
+        if match_weight <= 0.0:
+            return loss
+        root = self.model
+        if not isinstance(root, AttributeModelWithHardQuery):
+            raise TypeError("query_match_weight > 0 requires hard_query_adapter")
+        return loss + match_weight * hard_query_infonce(
+            root.gallery_embeddings(batch_images),
+            root.query_embeddings(batch_targets),
+            temperature=self.config.optimization.query_match_temperature,
+        )
+
+    def _step_optimizer(self, loss: torch.Tensor, *, use_amp: bool) -> None:
+        if use_amp:
+            self.scaler.scale(loss).backward()
+        else:
+            loss.backward()
+        if self.config.optimization.grad_clip_norm is not None:
+            if use_amp:
+                self.scaler.unscale_(self.optimizer)
+            nn.utils.clip_grad_norm_(
+                self.model.parameters(), self.config.optimization.grad_clip_norm
+            )
+        if self.device.type == "xla":
+            xm = importlib.import_module("torch_xla.core.xla_model")
+            xm.optimizer_step(self.optimizer)
+            self.ema_model.update_parameters(self.model)
+            return
+        scale_before = self.scaler.get_scale()
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
+        if self.scaler.get_scale() >= scale_before:
+            self.ema_model.update_parameters(self.model)
+
     def _train_epoch(self, loader: BatchIterable, epoch: int) -> tuple[float, int]:
         self.model.train()
         total_loss = 0.0
@@ -127,30 +175,8 @@ class Trainer:
             batch_targets = targets.to(self.device, non_blocking=True)
             self.optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type=autocast_type, enabled=use_amp):
-                smoothing = self.config.optimization.label_smoothing
-                loss_targets = batch_targets * (1.0 - smoothing) + 0.5 * smoothing
-                loss = self.criterion(self.model(batch_images), loss_targets)
-            if use_amp:
-                self.scaler.scale(loss).backward()
-            else:
-                loss.backward()
-            if self.config.optimization.grad_clip_norm is not None:
-                if use_amp:
-                    self.scaler.unscale_(self.optimizer)
-                nn.utils.clip_grad_norm_(
-                    self.model.parameters(), self.config.optimization.grad_clip_norm
-                )
-            if self.device.type == "xla":
-                xm = importlib.import_module("torch_xla.core.xla_model")
-                xm.optimizer_step(self.optimizer)
-                self.ema_model.update_parameters(self.model)
-            else:
-                scale_before = self.scaler.get_scale()
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-                if self.scaler.get_scale() >= scale_before:
-                    self.ema_model.update_parameters(self.model)
-
+                loss = self._batch_training_loss(batch_images, batch_targets)
+            self._step_optimizer(loss, use_amp=use_amp)
             batch_size = batch_targets.shape[0]
             total_loss += loss.detach().item() * batch_size
             total_samples += batch_size
@@ -192,10 +218,35 @@ class Trainer:
             self.device,
             progress=False,
         )
+        gallery_embeddings: np.ndarray | None = None
+        query_embeddings: np.ndarray | None = None
+        if self.config.ranking.distance == "clear_hard":
+            gallery_embeddings = predict_gallery_embeddings(
+                self.ema_model,
+                ranking.gallery_loader,
+                self.device,
+                progress=False,
+            )
+            root = getattr(self.ema_model, "module", self.ema_model)
+            if not isinstance(root, AttributeModelWithHardQuery):
+                raise TypeError("clear_hard requires AttributeModelWithHardQuery")
+            query_tensor = torch.as_tensor(
+                ranking.queries, dtype=torch.float32, device=self.device
+            )
+            with torch.inference_mode():
+                query_embeddings = root.query_embeddings(query_tensor).cpu().numpy()
         metrics = evaluate_ranking(
             ranking.queries,
             ranking.gallery_attrs,
-            l1_distance(ranking.queries, probabilities),
+            ranking_distance(
+                ranking.queries,
+                probabilities,
+                distance=self.config.ranking.distance,
+                temperature=self.config.ranking.temperature,
+                gallery_embeddings=gallery_embeddings,
+                query_embeddings=query_embeddings,
+                clear_fusion=self.config.ranking.clear_fusion,
+            ),
         )
         metrics["mA"] = mean_accuracy(probabilities, ranking.gallery_attrs)
         return metrics

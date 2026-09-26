@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import torch
-from torch import nn
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
 
@@ -158,7 +157,21 @@ def main() -> None:
     ranking = build_ranking_eval(config, device)
 
     model = build_model(config.model, num_attributes=num_attributes).to(device)
-    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight.to(device))
+    from src.wacv.checkpoint import load_model_weights
+    from src.wacv.losses import build_attribute_criterion
+
+    if config.run.init_weights is not None:
+        load_model_weights(
+            config.run.init_weights.resolve(),
+            model,
+            map_location=device,
+            strict=not config.model.hard_query_adapter,
+        )
+        LOGGER.info("initialized weights from %s", config.run.init_weights)
+    criterion = build_attribute_criterion(
+        focal_gamma=config.optimization.focal_gamma,
+        pos_weight=pos_weight.to(device),
+    )
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config.optimization.learning_rate,

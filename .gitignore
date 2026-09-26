@@ -267,7 +267,9 @@ $RECYCLE.BIN/
 # Local experiment artifacts and checkpoints
 /runs/
 
-# Generated Colab pipeline notebook (on-demand only)
-notebooks/train_pipeline.ipynb
+# Generated Colab / notebook exports (on-demand only; re-run exporter)
+notebooks/*.ipynb
+notebooks/.ipynb_checkpoints/
 
 .pytest-tmp/
+.pytest-cache/

@@ -71,7 +71,12 @@ def _export_weights(
         "name": config.model.name,
         "dropout": config.model.dropout,
         "num_attributes": num_attributes,
+        "hard_query_adapter": bool(config.model.hard_query_adapter),
+        "adapter_dim": int(config.model.adapter_dim),
         "source_checkpoint": str(checkpoint),
+        "ranking_distance": config.ranking.distance,
+        "ranking_temperature": float(config.ranking.temperature),
+        "clear_fusion": float(config.ranking.clear_fusion),
     }
 
 
