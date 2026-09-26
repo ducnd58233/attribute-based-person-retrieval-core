@@ -116,7 +116,12 @@ class CheckpointManager:
 
 
 def load_model_weights(
-    path: Path, model: nn.Module, *, map_location: torch.device, prefer_ema: bool = True
+    path: Path,
+    model: nn.Module,
+    *,
+    map_location: torch.device,
+    prefer_ema: bool = True,
+    strict: bool = True,
 ) -> None:
     """Load a full trainer checkpoint or a legacy model-only state dict."""
     checkpoint = cast(
@@ -124,7 +129,7 @@ def load_model_weights(
         torch.load(path, map_location=map_location, weights_only=True),
     )
     if "model" not in checkpoint:
-        model.load_state_dict(checkpoint)
+        model.load_state_dict(checkpoint, strict=strict)
         return
 
     if prefer_ema and "ema_model" in checkpoint:
@@ -136,4 +141,12 @@ def load_model_weights(
         }
     else:
         model_state = checkpoint["model"]
-    model.load_state_dict(model_state)
+
+    # Warm-start AttributeModelWithHardQuery from a plain classifier checkpoint.
+    current_keys = set(model.state_dict())
+    if any(key.startswith("backbone.") for key in current_keys) and not any(
+        key.startswith("backbone.") for key in model_state
+    ):
+        model_state = {f"backbone.{key}": value for key, value in model_state.items()}
+
+    model.load_state_dict(model_state, strict=strict)
