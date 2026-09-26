@@ -11,6 +11,7 @@ from pydantic.types import NonNegativeInt, PositiveInt
 
 ModelName = Literal["resnet50", "convnext_tiny", "convnext_base"]
 DeviceName = Literal["auto", "cpu", "cuda", "tpu"]
+DistanceName = Literal["l1", "specker", "clear_hard"]
 
 
 def _path_from_yaml(value: object) -> object:
@@ -47,6 +48,8 @@ class ModelConfig(StrictConfig):
     name: ModelName = "convnext_base"
     pretrained: bool = True
     dropout: float = Field(default=0.0, ge=0.0, lt=1.0)
+    hard_query_adapter: bool = False
+    adapter_dim: PositiveInt = 256
 
 
 class DataConfig(StrictConfig):
@@ -69,21 +72,40 @@ class OptimizationConfig(StrictConfig):
     scheduler_patience: NonNegativeInt = 3
     label_smoothing: float = Field(default=0.0, ge=0.0, lt=0.5)
     early_stop_patience: PositiveInt | None = None
+    focal_gamma: float = Field(default=0.0, ge=0.0, le=5.0)
+    query_match_weight: float = Field(default=0.0, ge=0.0, le=5.0)
+    query_match_temperature: PositiveFloat = 0.07
 
 
 class RunConfig(StrictConfig):
     name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
     output_dir: ConfigPath = Path("runs")
     resume: ResumeSetting = None
+    init_weights: ConfigPath | None = None
     seed: int = 42
     device: DeviceName = "auto"
     progress: bool = True
+
+
+class RankingConfig(StrictConfig):
+    """How gallery attribute probabilities become query distances."""
+
+    distance: DistanceName = "l1"
+    temperature: PositiveFloat = 1.5
+    clear_fusion: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Weight on CLEAR cosine term when distance=clear_hard "
+        "(rest is Specker L1 on calibrated probs).",
+    )
 
 
 class ExperimentConfig(StrictConfig):
     model: ModelConfig = ModelConfig()
     data: DataConfig = DataConfig()
     optimization: OptimizationConfig = OptimizationConfig()
+    ranking: RankingConfig = RankingConfig()
     run: RunConfig
 
 
@@ -123,6 +145,7 @@ def load_config(path: Path, *, project_root: Path | None = None) -> ExperimentCo
             "resume": _resolve_resume(
                 config.run.resume, output_dir, config.run.name, root
             ),
+            "init_weights": _resolve(config.run.init_weights, root),
         }
     )
     return config.model_copy(update={"data": data, "run": run})
