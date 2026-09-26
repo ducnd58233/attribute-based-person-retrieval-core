@@ -265,6 +265,27 @@ def _nll_distance(
     return -(queries @ logits.T) - log_1mp.sum(axis=1)[None, :]
 
 
+def _minmax_per_query(distances: np.ndarray) -> np.ndarray:
+    row_min = distances.min(axis=1, keepdims=True)
+    row_max = distances.max(axis=1, keepdims=True)
+    spread = row_max - row_min
+    safe = np.maximum(spread, 1e-8)
+    normalised = (distances - row_min) / safe
+    return np.where(spread > 0, normalised, np.zeros_like(distances))
+
+
+def _hybrid_distance(
+    queries: np.ndarray,
+    probabilities: np.ndarray,
+    temperature: float,
+    alpha: float,
+) -> np.ndarray:
+    nll = _minmax_per_query(_nll_distance(queries, probabilities, temperature))
+    l1 = _minmax_per_query(_l1_distance(queries, probabilities))
+    weight = float(alpha)
+    return weight * nll + (1.0 - weight) * l1
+
+
 def _clear_hard_distance(
     queries: np.ndarray,
     probabilities: np.ndarray,
@@ -319,6 +340,13 @@ def rank_gallery(sample: dict[str, Any]) -> dict[str, Any]:
         distances = _specker_distance(queries, probabilities, temperature)
     elif distance_name == "nll":
         distances = _nll_distance(queries, probabilities, temperature)
+    elif distance_name == "hybrid":
+        distances = _hybrid_distance(
+            queries,
+            probabilities,
+            temperature,
+            float(card.get("ranking_alpha", 0.5)),
+        )
     else:
         distances = _l1_distance(queries, probabilities)
     return {"distances": distances}

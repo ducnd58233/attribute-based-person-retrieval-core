@@ -11,7 +11,7 @@ from pydantic.types import NonNegativeInt, PositiveInt
 
 ModelName = Literal["resnet50", "convnext_tiny", "convnext_base"]
 DeviceName = Literal["auto", "cpu", "cuda", "tpu"]
-DistanceName = Literal["l1", "specker", "clear_hard", "nll"]
+DistanceName = Literal["l1", "specker", "clear_hard", "nll", "hybrid"]
 DomainName = Literal["PA100k", "PETA", "Market1501"]
 EvalProtocol = Literal["id_val", "lodo_m"]
 
@@ -96,6 +96,12 @@ class RankingConfig(StrictConfig):
 
     distance: DistanceName = "l1"
     temperature: PositiveFloat = 1.5
+    alpha: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Weight on NLL term when distance=hybrid (rest is L1).",
+    )
     clear_fusion: float = Field(
         default=0.5,
         ge=0.0,

@@ -12,7 +12,7 @@ from tqdm import tqdm
 
 from src.wacv.query_adapter import AttributeModelWithHardQuery
 
-DistanceName = Literal["l1", "specker", "clear_hard", "nll"]
+DistanceName = Literal["l1", "specker", "clear_hard", "nll", "hybrid"]
 _PROB_EPS = 1e-4
 
 Scorer = Callable[..., np.ndarray]
@@ -190,12 +190,39 @@ def nll_distance(
     return -(query_values @ logits.T) - log_1mp.sum(axis=1)[None, :]
 
 
+def _minmax_per_query(distances: np.ndarray) -> np.ndarray:
+    """Scale each query row to [0, 1]; constant rows become zeros."""
+    row_min = distances.min(axis=1, keepdims=True)
+    row_max = distances.max(axis=1, keepdims=True)
+    spread = row_max - row_min
+    safe = np.maximum(spread, 1e-8)
+    normalised = (distances - row_min) / safe
+    return np.where(spread > 0, normalised, np.zeros_like(distances))
+
+
+def hybrid_distance(
+    queries: np.ndarray,
+    probabilities: np.ndarray,
+    *,
+    alpha: float = 0.5,
+    temperature: float = 1.0,
+) -> np.ndarray:
+    """Per-query mix of min-max-normalised NLL and L1 distances."""
+    nll = _minmax_per_query(
+        nll_distance(queries, probabilities, temperature=temperature)
+    )
+    l1 = _minmax_per_query(l1_distance(queries, probabilities))
+    weight = float(alpha)
+    return weight * nll + (1.0 - weight) * l1
+
+
 def ranking_distance(
     queries: np.ndarray,
     probabilities: np.ndarray,
     *,
     distance: DistanceName | str = "l1",
     temperature: float = 1.5,
+    alpha: float = 0.5,
     gallery_embeddings: np.ndarray | None = None,
     query_embeddings: np.ndarray | None = None,
     clear_fusion: float = 0.5,
@@ -209,6 +236,7 @@ def ranking_distance(
         queries,
         probabilities,
         temperature=temperature,
+        alpha=alpha,
         gallery_embeddings=gallery_embeddings,
         query_embeddings=query_embeddings,
         clear_fusion=clear_fusion,
@@ -267,10 +295,22 @@ def _score_nll(
     return nll_distance(queries, probabilities, temperature=temperature)
 
 
+def _score_hybrid(
+    queries: np.ndarray,
+    probabilities: np.ndarray,
+    *,
+    temperature: float = 1.0,
+    alpha: float = 0.5,
+    **_: object,
+) -> np.ndarray:
+    return hybrid_distance(queries, probabilities, alpha=alpha, temperature=temperature)
+
+
 register_scorer("l1", _score_l1)
 register_scorer("specker", _score_specker)
 register_scorer("clear_hard", _score_clear_hard)
 register_scorer("nll", _score_nll)
+register_scorer("hybrid", _score_hybrid)
 
 
 def mean_accuracy(probabilities: np.ndarray, targets: np.ndarray) -> float:

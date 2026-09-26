@@ -144,6 +144,7 @@ def _evaluate_protocol(
             probabilities,
             distance=distance,
             temperature=config.ranking.temperature,
+            alpha=config.ranking.alpha,
             gallery_embeddings=gallery_embeddings,
             query_embeddings=query_embeddings,
             clear_fusion=config.ranking.clear_fusion,

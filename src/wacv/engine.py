@@ -243,6 +243,7 @@ class Trainer:
                 probabilities,
                 distance=self.config.ranking.distance,
                 temperature=self.config.ranking.temperature,
+                alpha=self.config.ranking.alpha,
                 gallery_embeddings=gallery_embeddings,
                 query_embeddings=query_embeddings,
                 clear_fusion=self.config.ranking.clear_fusion,

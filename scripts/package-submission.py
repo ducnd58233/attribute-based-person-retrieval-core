@@ -76,6 +76,7 @@ def _export_weights(
         "source_checkpoint": str(checkpoint),
         "ranking_distance": config.ranking.distance,
         "ranking_temperature": float(config.ranking.temperature),
+        "ranking_alpha": float(config.ranking.alpha),
         "clear_fusion": float(config.ranking.clear_fusion),
     }
 
