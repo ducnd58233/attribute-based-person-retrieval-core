@@ -35,7 +35,7 @@ def parse_args() -> argparse.Namespace:
 
 def build_loaders(
     config: ExperimentConfig, device: torch.device
-) -> tuple[DataLoader, DataLoader, torch.Tensor, int]:
+) -> tuple[DataLoader, DataLoader, torch.Tensor, torch.Tensor, int]:
     from src.wacv.attributes import attribute_names_from_columns
     from src.wacv.data import (
         AttributeDataset,
@@ -102,7 +102,8 @@ def build_loaders(
         upper=config.optimization.pos_weight_clip
     )
     pos_weight = torch.tensor(weights.to_numpy(), dtype=torch.float32)
-    return train_loader, val_loader, pos_weight, len(attribute_names)
+    prior = torch.tensor(positive_rates.to_numpy(), dtype=torch.float32)
+    return train_loader, val_loader, pos_weight, prior, len(attribute_names)
 
 
 def build_ranking_eval(
@@ -168,6 +169,22 @@ def build_ranking_eval(
     )
 
 
+def maybe_wrap_logit_adjust(
+    criterion: object,
+    config: ExperimentConfig,
+    prior: torch.Tensor,
+    device: torch.device,
+) -> object:
+    """Optionally wrap the attribute criterion with a train-time prior offset."""
+    if not config.optimization.logit_adjust:
+        return criterion
+    from src.wacv.losses import LogitAdjustedLoss, logit_adjustment_offset
+
+    offset = logit_adjustment_offset(prior.to(device))
+    LOGGER.info("logit_adjust enabled (train-time prior offset)")
+    return LogitAdjustedLoss(criterion, offset)  # type: ignore[arg-type]
+
+
 def main() -> None:
     from src.wacv.checkpoint import load_model_weights
     from src.wacv.config import load_config
@@ -185,7 +202,9 @@ def main() -> None:
             "no CUDA available; training on CPU (slow for ConvNeXt). "
             "On Colab: Runtime → Change runtime type → GPU."
         )
-    train_loader, val_loader, pos_weight, num_attributes = build_loaders(config, device)
+    train_loader, val_loader, pos_weight, prior, num_attributes = build_loaders(
+        config, device
+    )
     ranking = build_ranking_eval(config, device)
 
     model = build_model(config.model, num_attributes=num_attributes).to(device)
@@ -201,6 +220,7 @@ def main() -> None:
         focal_gamma=config.optimization.focal_gamma,
         pos_weight=pos_weight.to(device),
     )
+    criterion = maybe_wrap_logit_adjust(criterion, config, prior, device)
 
     with RunTracker(config) as tracker:
         tracker.logger.info(

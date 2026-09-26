@@ -111,6 +111,10 @@ class OptimizationConfig(StrictConfig):
         le=1.0,
         description="Layer-wise LR decay for ViT FT (deeper layers keep higher LR).",
     )
+    logit_adjust: bool = Field(
+        default=False,
+        description="Train-time logit offset from priors; eval uses raw logits.",
+    )
 
 
 class RunConfig(StrictConfig):
