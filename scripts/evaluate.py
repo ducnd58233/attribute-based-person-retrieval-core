@@ -240,11 +240,9 @@ def main() -> None:
     checkpoint = args.checkpoint or (
         config.run.output_dir / config.run.name / "checkpoints" / "best.pt"
     )
-    protocols: tuple[ProtocolName, ...]
-    if args.protocol == "both":
-        protocols = ("id_val", "lodo_m")
-    else:
-        protocols = (args.protocol,)
+    protocols: tuple[ProtocolName, ...] = (
+        ("id_val", "lodo_m") if args.protocol == "both" else (args.protocol,)
+    )
 
     results, config = evaluate_checkpoint(
         args.config,
