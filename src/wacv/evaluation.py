@@ -12,7 +12,7 @@ from tqdm import tqdm
 
 from src.wacv.query_adapter import AttributeModelWithHardQuery
 
-DistanceName = Literal["l1", "specker", "clear_hard"]
+DistanceName = Literal["l1", "specker", "clear_hard", "nll"]
 _PROB_EPS = 1e-4
 
 Scorer = Callable[..., np.ndarray]
@@ -169,6 +169,27 @@ def clear_hard_distance(
     return (1.0 - fusion) * specker + fusion * cosine_distance
 
 
+def nll_distance(
+    queries: np.ndarray,
+    probabilities: np.ndarray,
+    *,
+    temperature: float = 1.0,
+) -> np.ndarray:
+    """Bernoulli negative log-likelihood distance (exact-match under independence).
+
+    For query bit ``q`` and gallery probability ``p`` (optionally temperature-
+    calibrated), contributes ``-(q log p + (1-q) log(1-p))``. Computed with two
+    matmuls / broadcasts — never materialises a ``(Q, G, 40)`` tensor.
+    """
+    calibrated = _calibrate_probabilities(probabilities, temperature)
+    log_p = np.log(calibrated)
+    log_1mp = np.log(1.0 - calibrated)
+    logits = log_p - log_1mp
+    query_values = queries.astype(np.float32)
+    # -q·logit(p) - 1·log(1-p)  ==  -Σ[q log p + (1-q) log(1-p)]
+    return -(query_values @ logits.T) - log_1mp.sum(axis=1)[None, :]
+
+
 def ranking_distance(
     queries: np.ndarray,
     probabilities: np.ndarray,
@@ -236,9 +257,20 @@ def _score_clear_hard(
     )
 
 
+def _score_nll(
+    queries: np.ndarray,
+    probabilities: np.ndarray,
+    *,
+    temperature: float = 1.0,
+    **_: object,
+) -> np.ndarray:
+    return nll_distance(queries, probabilities, temperature=temperature)
+
+
 register_scorer("l1", _score_l1)
 register_scorer("specker", _score_specker)
 register_scorer("clear_hard", _score_clear_hard)
+register_scorer("nll", _score_nll)
 
 
 def mean_accuracy(probabilities: np.ndarray, targets: np.ndarray) -> float:

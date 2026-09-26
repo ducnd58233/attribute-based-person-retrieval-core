@@ -52,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--distance",
-        choices=("l1", "specker", "clear_hard"),
+        choices=("l1", "specker", "clear_hard", "nll"),
         default=None,
         help="override ranking.distance from the config",
     )

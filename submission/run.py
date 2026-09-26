@@ -252,6 +252,19 @@ def _specker_distance(
     return clipped.sum(1)[None, :] + queries @ (1.0 - 2.0 * clipped).T
 
 
+def _nll_distance(
+    queries: np.ndarray, probabilities: np.ndarray, temperature: float
+) -> np.ndarray:
+    clipped = np.clip(probabilities.astype(np.float32), _PROB_EPS, 1.0 - _PROB_EPS)
+    if temperature != 1.0:
+        logits = np.log(clipped) - np.log1p(-clipped)
+        clipped = 1.0 / (1.0 + np.exp(-(logits / float(temperature))))
+    log_p = np.log(clipped)
+    log_1mp = np.log(1.0 - clipped)
+    logits = log_p - log_1mp
+    return -(queries @ logits.T) - log_1mp.sum(axis=1)[None, :]
+
+
 def _clear_hard_distance(
     queries: np.ndarray,
     probabilities: np.ndarray,
@@ -304,6 +317,8 @@ def rank_gallery(sample: dict[str, Any]) -> dict[str, Any]:
         )
     elif distance_name == "specker":
         distances = _specker_distance(queries, probabilities, temperature)
+    elif distance_name == "nll":
+        distances = _nll_distance(queries, probabilities, temperature)
     else:
         distances = _l1_distance(queries, probabilities)
     return {"distances": distances}
