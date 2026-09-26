@@ -36,6 +36,37 @@ TRAIN_TRANSFORM = transforms.Compose(
     ]
 )
 
+# open_clip ViT-B/16 openai mean/std; aspect-preserving 256x128 ReID crop.
+_CLIP_MEAN = [0.48145466, 0.4578275, 0.40821073]
+_CLIP_STD = [0.26862954, 0.26130258, 0.27577711]
+
+CLIP_IMAGE_TRANSFORM = transforms.Compose(
+    [
+        transforms.Resize((256, 128)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=_CLIP_MEAN, std=_CLIP_STD),
+    ]
+)
+
+CLIP_TRAIN_TRANSFORM = transforms.Compose(
+    [
+        transforms.Resize((256, 128)),
+        transforms.AugMix(),
+        transforms.RandomHorizontalFlip(),
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=_CLIP_MEAN, std=_CLIP_STD),
+        transforms.RandomErasing(p=0.25),
+    ]
+)
+
+
+def transforms_for_model(model_name: str, *, train: bool) -> transforms.Compose:
+    """Pick ImageNet ReID crops or CLIP 256x128 preprocessing."""
+    if model_name.startswith("clip_"):
+        return CLIP_TRAIN_TRANSFORM if train else CLIP_IMAGE_TRANSFORM
+    return TRAIN_TRANSFORM if train else IMAGE_TRANSFORM
+
 
 def load_gt(csv_path: Path) -> pd.DataFrame:
     """Load a gt.csv: one row per image, `image` plus the attribute columns."""

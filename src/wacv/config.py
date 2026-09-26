@@ -9,7 +9,7 @@ import yaml
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PositiveFloat
 from pydantic.types import NonNegativeInt, PositiveInt
 
-ModelName = Literal["resnet50", "convnext_tiny", "convnext_base"]
+ModelName = Literal["resnet50", "convnext_tiny", "convnext_base", "clip_vit_b16"]
 DeviceName = Literal["auto", "cpu", "cuda", "tpu"]
 DistanceName = Literal[
     "l1", "specker", "clear_hard", "nll", "hybrid", "group_categorical"
@@ -58,6 +58,7 @@ class ModelConfig(StrictConfig):
     dropout: float = Field(default=0.0, ge=0.0, lt=1.0)
     hard_query_adapter: bool = False
     adapter_dim: PositiveInt = 256
+    freeze_backbone: bool = False
 
 
 class DataConfig(StrictConfig):
@@ -85,6 +86,18 @@ class OptimizationConfig(StrictConfig):
     focal_gamma: float = Field(default=0.0, ge=0.0, le=5.0)
     query_match_weight: float = Field(default=0.0, ge=0.0, le=5.0)
     query_match_temperature: PositiveFloat = 0.07
+    lp_ft: bool = Field(
+        default=False,
+        description="Two-stage linear-probe then full fine-tune schedule.",
+    )
+    lp_epochs: PositiveInt = 2
+    lp_learning_rate: PositiveFloat = 1e-3
+    layer_decay: float = Field(
+        default=0.65,
+        gt=0.0,
+        le=1.0,
+        description="Layer-wise LR decay for ViT FT (deeper layers keep higher LR).",
+    )
 
 
 class RunConfig(StrictConfig):

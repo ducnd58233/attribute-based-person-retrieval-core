@@ -110,7 +110,7 @@ def _evaluate_protocol(
     distance: str,
     calibration_out: Path | None = None,
 ) -> dict[str, float]:
-    from src.wacv.data import AttributeDataset
+    from src.wacv.data import AttributeDataset, transforms_for_model
     from src.wacv.engine import resolve_num_workers
     from src.wacv.evaluation import (
         apply_per_attribute_temperatures,
@@ -125,7 +125,10 @@ def _evaluate_protocol(
     workers = resolve_num_workers(config.data.num_workers)
     loader = DataLoader(
         AttributeDataset(
-            ground_truth, config.data.root, attribute_names=attribute_names
+            ground_truth,
+            config.data.root,
+            transforms_for_model(config.model.name, train=False),
+            attribute_names=attribute_names,
         ),
         batch_size=config.data.batch_size,
         num_workers=workers,
