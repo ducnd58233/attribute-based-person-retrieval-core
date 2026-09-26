@@ -134,7 +134,12 @@ def _evaluate_protocol(
     )
     started = time.perf_counter()
     probabilities = predict_probabilities(
-        model, loader, device, progress=config.run.progress
+        model,
+        loader,
+        device,
+        progress=config.run.progress,
+        tta=config.inference.tta,
+        tta_scale=float(config.inference.tta_scale),
     )
     attributes = ground_truth[list(attribute_names)].to_numpy(dtype=np.int64)
     score_temperature = float(config.ranking.temperature)

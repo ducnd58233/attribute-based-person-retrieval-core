@@ -82,6 +82,8 @@ def _export_weights(
         "ranking_query_norm": config.ranking.query_norm,
         "ranking_query_norm_tau": float(config.ranking.query_norm_tau),
         "clear_fusion": float(config.ranking.clear_fusion),
+        "inference_tta": list(config.inference.tta),
+        "inference_tta_scale": float(config.inference.tta_scale),
     }
 
 

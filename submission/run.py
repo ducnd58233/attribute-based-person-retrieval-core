@@ -206,17 +206,51 @@ def _iter_gallery_tensors(gallery: list[dict[str, Any]], device: torch.device) -
         yield images
 
 
+def _apply_tta_view(
+    images: torch.Tensor, view: str, *, scale: float = 1.15
+) -> torch.Tensor:
+    if view == "identity":
+        return images
+    if view == "hflip":
+        return torch.flip(images, dims=(-1,))
+    if view == "scale_crop":
+        _, _, height, width = images.shape
+        factor = float(scale)
+        new_h = max(height, round(height * factor))
+        new_w = max(width, round(width * factor))
+        upsampled = F.interpolate(
+            images, size=(new_h, new_w), mode="bilinear", align_corners=False
+        )
+        top = max(0, (new_h - height) // 2)
+        left = max(0, (new_w - width) // 2)
+        return upsampled[:, :, top : top + height, left : left + width]
+    raise ValueError(f"Unknown TTA view {view!r}")
+
+
 def _predict_gallery(gallery: list[dict[str, Any]]) -> np.ndarray:
     load_model()
     model = _STATE["model"]
     device = _STATE["device"]
+    card = _STATE["card"] if isinstance(_STATE["card"], dict) else {}
     if not isinstance(model, nn.Module) or not isinstance(device, torch.device):
         raise RuntimeError("Model failed to load")
+    raw_tta = card.get("inference_tta", ["identity"])
+    tta_views: list[str]
+    if isinstance(raw_tta, list) and raw_tta:
+        tta_views = [str(v) for v in raw_tta]
+    else:
+        tta_views = ["identity"]
+    tta_scale = float(card.get("inference_tta_scale", 1.15))
     batches: list[np.ndarray] = []
     with torch.inference_mode():
         for images in _iter_gallery_tensors(gallery, device):
-            logits = model(images)
-            batches.append(torch.sigmoid(logits).float().cpu().numpy())
+            probs_sum: torch.Tensor | None = None
+            for view in tta_views:
+                logits = model(_apply_tta_view(images, view, scale=tta_scale))
+                probs = torch.sigmoid(logits)
+                probs_sum = probs if probs_sum is None else probs_sum + probs
+            assert probs_sum is not None
+            batches.append((probs_sum / float(len(tta_views))).float().cpu().numpy())
     if not batches:
         raise ValueError("Gallery is empty")
     return np.concatenate(batches, axis=0)

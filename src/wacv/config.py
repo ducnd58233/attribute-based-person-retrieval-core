@@ -17,6 +17,7 @@ DistanceName = Literal[
 GroupMode = Literal["independent", "categorical"]
 CalibrationMode = Literal["none", "per_attribute"]
 QueryNorm = Literal["none", "dual_softmax"]
+TTAView = Literal["identity", "hflip", "scale_crop"]
 DomainName = Literal["PA100k", "PETA", "Market1501"]
 EvalProtocol = Literal["id_val", "lodo_m"]
 
@@ -96,6 +97,20 @@ class RunConfig(StrictConfig):
     progress: bool = True
 
 
+class InferenceConfig(StrictConfig):
+    """Test-time prediction options (no training side effects)."""
+
+    tta: list[TTAView] = Field(
+        default_factory=lambda: ["identity"],
+        description="Views to average probabilities over: identity, hflip, "
+        "scale_crop (1.15x bilinear upsample then center-crop).",
+    )
+    tta_scale: PositiveFloat = Field(
+        default=1.15,
+        description="Upsample factor for the scale_crop TTA view.",
+    )
+
+
 class RankingConfig(StrictConfig):
     """How gallery attribute probabilities become query distances."""
 
@@ -140,6 +155,7 @@ class ExperimentConfig(StrictConfig):
     data: DataConfig = DataConfig()
     optimization: OptimizationConfig = OptimizationConfig()
     ranking: RankingConfig = RankingConfig()
+    inference: InferenceConfig = InferenceConfig()
     run: RunConfig
 
 

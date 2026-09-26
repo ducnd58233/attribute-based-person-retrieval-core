@@ -217,6 +217,8 @@ class Trainer:
             ranking.gallery_loader,
             self.device,
             progress=False,
+            tta=self.config.inference.tta,
+            tta_scale=float(self.config.inference.tta_scale),
         )
         gallery_embeddings: np.ndarray | None = None
         query_embeddings: np.ndarray | None = None

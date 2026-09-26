@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, MutableMapping
+from collections.abc import Callable, Iterable, MutableMapping, Sequence
 from typing import Literal
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch import nn
 from tqdm import tqdm
 
@@ -26,7 +27,9 @@ DistanceName = Literal[
     "group_categorical",
 ]
 CalibrationMode = Literal["none", "per_attribute"]
+TTAView = Literal["identity", "hflip", "scale_crop"]
 _PROB_EPS = 1e-4
+_DEFAULT_TTA: tuple[TTAView, ...] = ("identity",)
 
 Scorer = Callable[..., np.ndarray]
 SCORERS: MutableMapping[str, Scorer] = {}
@@ -52,19 +55,61 @@ def _unwrap_eval_module(model: nn.Module) -> nn.Module:
     return inner if isinstance(inner, nn.Module) else model
 
 
+def apply_tta_view(
+    images: torch.Tensor,
+    view: str,
+    *,
+    scale: float = 1.15,
+) -> torch.Tensor:
+    """Return a tensor view for test-time augmentation (NCHW)."""
+    if view == "identity":
+        return images
+    if view == "hflip":
+        return torch.flip(images, dims=(-1,))
+    if view == "scale_crop":
+        _, _, height, width = images.shape
+        factor = float(scale)
+        if factor <= 0.0:
+            raise ValueError(f"tta scale must be positive, got {factor}")
+        new_h = max(height, round(height * factor))
+        new_w = max(width, round(width * factor))
+        upsampled = F.interpolate(
+            images,
+            size=(new_h, new_w),
+            mode="bilinear",
+            align_corners=False,
+        )
+        top = max(0, (new_h - height) // 2)
+        left = max(0, (new_w - width) // 2)
+        return upsampled[:, :, top : top + height, left : left + width]
+    raise ValueError(f"Unknown TTA view {view!r}")
+
+
 def predict_probabilities(
     model: nn.Module,
     loader: Iterable[tuple[torch.Tensor, torch.Tensor]],
     device: torch.device,
     *,
     progress: bool,
+    tta: Sequence[str] | None = None,
+    tta_scale: float = 1.15,
 ) -> np.ndarray:
+    """Predict gallery attribute probabilities, optionally averaging TTA views."""
     model.eval()
+    views: Sequence[str] = tuple(tta) if tta else _DEFAULT_TTA
+    if not views:
+        views = _DEFAULT_TTA
     batches: list[np.ndarray] = []
     with torch.inference_mode():
         for images, _ in tqdm(loader, desc="predict", disable=not progress):
-            logits = model(images.to(device, non_blocking=True))
-            batches.append(torch.sigmoid(logits).cpu().numpy())
+            batch = images.to(device, non_blocking=True)
+            probs_sum: torch.Tensor | None = None
+            for view in views:
+                logits = model(apply_tta_view(batch, view, scale=tta_scale))
+                probs = torch.sigmoid(logits)
+                probs_sum = probs if probs_sum is None else probs_sum + probs
+            assert probs_sum is not None
+            batches.append((probs_sum / float(len(views))).cpu().numpy())
     if not batches:
         raise ValueError("Evaluation loader is empty")
     return np.concatenate(batches, axis=0)
