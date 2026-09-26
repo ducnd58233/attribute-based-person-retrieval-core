@@ -551,7 +551,7 @@ def dual_softmax_rerank(
     distance. Softmax is column-wise (over queries for each gallery image),
     which dampens hubness without using ground-truth matches.
     """
-    similarities = -distances.astype(np.float64)
+    similarities = -distances.astype(np.float32, copy=False)
     scale = max(float(tau), 1e-8)
     scaled = similarities / scale
     row_max = scaled.max(axis=0, keepdims=True)
@@ -559,7 +559,7 @@ def dual_softmax_rerank(
     log_partition = np.log(np.maximum(exp_shifted.sum(axis=0, keepdims=True), 1e-12))
     log_softmax = scaled - row_max - log_partition
     adjusted = similarities + log_softmax
-    return (-adjusted).astype(np.float32)
+    return (-adjusted).astype(np.float32, copy=False)
 
 
 def mean_accuracy(probabilities: np.ndarray, targets: np.ndarray) -> float:
