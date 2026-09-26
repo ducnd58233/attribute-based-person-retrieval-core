@@ -12,6 +12,8 @@ from pydantic.types import NonNegativeInt, PositiveInt
 ModelName = Literal["resnet50", "convnext_tiny", "convnext_base"]
 DeviceName = Literal["auto", "cpu", "cuda", "tpu"]
 DistanceName = Literal["l1", "specker", "clear_hard"]
+DomainName = Literal["PA100k", "PETA", "Market1501"]
+EvalProtocol = Literal["id_val", "lodo_m"]
 
 
 def _path_from_yaml(value: object) -> object:
@@ -58,6 +60,8 @@ class DataConfig(StrictConfig):
     num_workers: NonNegativeInt = 4
     limit: PositiveInt | None = None
     train_augmentation: bool = True
+    train_domains: list[DomainName] | None = None
+    eval_domains: list[DomainName] | None = None
 
 
 class OptimizationConfig(StrictConfig):

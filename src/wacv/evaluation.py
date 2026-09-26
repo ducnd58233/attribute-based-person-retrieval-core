@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, MutableMapping
 from typing import Literal
 
 import numpy as np
@@ -14,6 +14,23 @@ from src.wacv.query_adapter import AttributeModelWithHardQuery
 
 DistanceName = Literal["l1", "specker", "clear_hard"]
 _PROB_EPS = 1e-4
+
+Scorer = Callable[..., np.ndarray]
+SCORERS: MutableMapping[str, Scorer] = {}
+
+
+def register_scorer(name: str, scorer: Scorer) -> None:
+    """Register or replace a Track-2 ranking distance under ``name``."""
+    SCORERS[name] = scorer
+
+
+def get_scorer(name: str) -> Scorer:
+    """Return a registered scorer or raise ``KeyError`` with known names."""
+    try:
+        return SCORERS[name]
+    except KeyError as exc:
+        known = ", ".join(sorted(SCORERS)) or "(none)"
+        raise KeyError(f"Unknown ranking distance {name!r}; known: {known}") from exc
 
 
 def _unwrap_eval_module(model: nn.Module) -> nn.Module:
@@ -156,31 +173,72 @@ def ranking_distance(
     queries: np.ndarray,
     probabilities: np.ndarray,
     *,
-    distance: DistanceName = "l1",
+    distance: DistanceName | str = "l1",
     temperature: float = 1.5,
     gallery_embeddings: np.ndarray | None = None,
     query_embeddings: np.ndarray | None = None,
     clear_fusion: float = 0.5,
 ) -> np.ndarray:
-    """Dispatch the configured Track-2 ranking distance."""
-    if distance == "l1":
-        return l1_distance(queries, probabilities)
-    if distance == "specker":
-        return specker_distance(queries, probabilities, temperature=temperature)
-    if distance == "clear_hard":
-        if gallery_embeddings is None or query_embeddings is None:
-            raise ValueError(
-                "clear_hard ranking requires gallery_embeddings and query_embeddings"
-            )
-        return clear_hard_distance(
-            queries,
-            probabilities,
-            gallery_embeddings,
-            query_embeddings,
-            temperature=temperature,
-            clear_fusion=clear_fusion,
+    """Dispatch the configured Track-2 ranking distance via the scorer registry."""
+    try:
+        scorer = get_scorer(distance)
+    except KeyError as exc:
+        raise ValueError(str(exc)) from exc
+    return scorer(
+        queries,
+        probabilities,
+        temperature=temperature,
+        gallery_embeddings=gallery_embeddings,
+        query_embeddings=query_embeddings,
+        clear_fusion=clear_fusion,
+    )
+
+
+def _score_l1(
+    queries: np.ndarray,
+    probabilities: np.ndarray,
+    **_: object,
+) -> np.ndarray:
+    return l1_distance(queries, probabilities)
+
+
+def _score_specker(
+    queries: np.ndarray,
+    probabilities: np.ndarray,
+    *,
+    temperature: float = 1.5,
+    **_: object,
+) -> np.ndarray:
+    return specker_distance(queries, probabilities, temperature=temperature)
+
+
+def _score_clear_hard(
+    queries: np.ndarray,
+    probabilities: np.ndarray,
+    *,
+    temperature: float = 1.5,
+    gallery_embeddings: np.ndarray | None = None,
+    query_embeddings: np.ndarray | None = None,
+    clear_fusion: float = 0.5,
+    **_: object,
+) -> np.ndarray:
+    if gallery_embeddings is None or query_embeddings is None:
+        raise ValueError(
+            "clear_hard ranking requires gallery_embeddings and query_embeddings"
         )
-    raise ValueError(f"Unknown ranking distance: {distance}")
+    return clear_hard_distance(
+        queries,
+        probabilities,
+        gallery_embeddings,
+        query_embeddings,
+        temperature=temperature,
+        clear_fusion=clear_fusion,
+    )
+
+
+register_scorer("l1", _score_l1)
+register_scorer("specker", _score_specker)
+register_scorer("clear_hard", _score_clear_hard)
 
 
 def mean_accuracy(probabilities: np.ndarray, targets: np.ndarray) -> float:

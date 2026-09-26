@@ -41,13 +41,18 @@ def build_loaders(
         IMAGE_TRANSFORM,
         TRAIN_TRANSFORM,
         AttributeDataset,
+        filter_gt_by_domains,
         load_gt,
     )
     from src.wacv.engine import resolve_num_workers
 
     annotation_root = config.data.root / "annotations" / "task1"
-    train_gt = load_gt(annotation_root / "train" / "gt.csv")
-    val_gt = load_gt(annotation_root / "val" / "gt.csv")
+    train_gt = filter_gt_by_domains(
+        load_gt(annotation_root / "train" / "gt.csv"), config.data.train_domains
+    )
+    val_gt = filter_gt_by_domains(
+        load_gt(annotation_root / "val" / "gt.csv"), config.data.eval_domains
+    )
     attribute_names = attribute_names_from_columns(
         tuple(str(c) for c in train_gt.columns)
     )
