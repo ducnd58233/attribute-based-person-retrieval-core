@@ -66,7 +66,17 @@ def _export_weights(
     )
     load_model_weights(checkpoint.resolve(), model, map_location=torch.device("cpu"))
     destination.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(model.state_dict(), destination)
+    weight_format = "state_dict"
+    if config.model.name.startswith("clip_"):
+        # TorchScript avoids vendoring open_clip into the eval image.
+        model.eval()
+        example = torch.zeros(1, 3, 256, 128)
+        with torch.inference_mode():
+            traced = torch.jit.trace(model, example)
+        traced.save(str(destination))
+        weight_format = "torchscript"
+    else:
+        torch.save(model.state_dict(), destination)
     return {
         "name": config.model.name,
         "dropout": config.model.dropout,
@@ -74,6 +84,18 @@ def _export_weights(
         "hard_query_adapter": bool(config.model.hard_query_adapter),
         "adapter_dim": int(config.model.adapter_dim),
         "source_checkpoint": str(checkpoint),
+        "weight_format": weight_format,
+        "image_size": [256, 128],
+        "image_mean": (
+            [0.48145466, 0.4578275, 0.40821073]
+            if config.model.name.startswith("clip_")
+            else [0.485, 0.456, 0.406]
+        ),
+        "image_std": (
+            [0.26862954, 0.26130258, 0.27577711]
+            if config.model.name.startswith("clip_")
+            else [0.229, 0.224, 0.225]
+        ),
         "ranking_distance": config.ranking.distance,
         "ranking_temperature": float(config.ranking.temperature),
         "ranking_alpha": float(config.ranking.alpha),

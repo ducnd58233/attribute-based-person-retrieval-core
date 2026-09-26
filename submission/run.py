@@ -36,6 +36,21 @@ IMAGE_TRANSFORM = transforms.Compose(
 _STATE: dict[str, Any] = {"model": None, "device": None, "card": None}
 
 
+def _image_transform_from_card(card: dict[str, Any]) -> transforms.Compose:
+    size = card.get("image_size", [256, 128])
+    if not isinstance(size, list) or len(size) != 2:
+        size = [256, 128]
+    mean = card.get("image_mean", [0.485, 0.456, 0.406])
+    std = card.get("image_std", [0.229, 0.224, 0.225])
+    return transforms.Compose(
+        [
+            transforms.Resize((int(size[0]), int(size[1]))),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=list(mean), std=list(std)),
+        ]
+    )
+
+
 class _HasFc(Protocol):
     fc: nn.Module
 
@@ -179,24 +194,31 @@ def load_model() -> None:
     with CARD_PATH.open(encoding="utf-8") as handle:
         card = json.load(handle)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = _build_model(card)
-    state = torch.load(WEIGHTS_PATH, map_location=device, weights_only=True)
-    model.load_state_dict(state)
-    model.to(device)
+    if str(card.get("weight_format", "state_dict")) == "torchscript":
+        model = torch.jit.load(WEIGHTS_PATH, map_location=device)
+    else:
+        model = _build_model(card)
+        state = torch.load(WEIGHTS_PATH, map_location=device, weights_only=True)
+        model.load_state_dict(state)
+        model.to(device)
     model.eval()
     _STATE["model"] = model
     _STATE["device"] = device
     _STATE["card"] = card
+    _STATE["transform"] = _image_transform_from_card(card)
 
 
 def _iter_gallery_tensors(gallery: list[dict[str, Any]], device: torch.device) -> Any:
     total = len(gallery)
+    transform = _STATE.get("transform", IMAGE_TRANSFORM)
+    if not isinstance(transform, transforms.Compose):
+        transform = IMAGE_TRANSFORM
     for start in range(0, total, BATCH_SIZE):
         chunk = gallery[start : start + BATCH_SIZE]
         tensors: list[torch.Tensor] = []
         for item in chunk:
             image = Image.open(item["image_path"]).convert("RGB")
-            tensor = IMAGE_TRANSFORM(image)
+            tensor = transform(image)
             if not isinstance(tensor, torch.Tensor):
                 raise TypeError("Image transform must return a tensor")
             tensors.append(tensor)
