@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import importlib.util
+from pathlib import Path
+
 import numpy as np
 
 from src.wacv.evaluation import dual_softmax_rerank
@@ -25,10 +28,15 @@ def test_dual_softmax_changes_ranking() -> None:
     assert out[1, 1] < out[1, 0]
 
 
-def test_submission_dual_softmax_matches_library() -> None:
-    import importlib.util
-    from pathlib import Path
+def test_dual_softmax_chunking_matches_full() -> None:
+    rng = np.random.default_rng(7)
+    distances = rng.random((64, 257), dtype=np.float32)
+    full = dual_softmax_rerank(distances, tau=0.05, chunk_cols=10_000)
+    chunked = dual_softmax_rerank(distances, tau=0.05, chunk_cols=17)
+    np.testing.assert_allclose(chunked, full, rtol=1e-5, atol=1e-5)
 
+
+def test_submission_dual_softmax_matches_library() -> None:
     run_path = Path(__file__).resolve().parents[1] / "submission" / "run.py"
     spec = importlib.util.spec_from_file_location("submission_run_ds", run_path)
     assert spec is not None and spec.loader is not None

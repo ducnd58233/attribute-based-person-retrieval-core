@@ -543,6 +543,7 @@ def dual_softmax_rerank(
     distances: np.ndarray,
     *,
     tau: float = 0.05,
+    chunk_cols: int = 4096,
 ) -> np.ndarray:
     """Query-set dual softmax over gallery columns (no labels, no updates).
 
@@ -550,16 +551,26 @@ def dual_softmax_rerank(
     ``S' = S + log_softmax_{queries}(S / tau)`` and returns ``-S'`` as a
     distance. Softmax is column-wise (over queries for each gallery image),
     which dampens hubness without using ground-truth matches.
+
+    Gallery columns are processed in chunks so peak RAM stays bounded on
+    Codabench-sized Q×G matrices (float64 full-matrix form peaked ~6GB).
     """
-    similarities = -distances.astype(np.float32, copy=False)
+    similarities = -np.asarray(distances, dtype=np.float32)
     scale = max(float(tau), 1e-8)
-    scaled = similarities / scale
-    row_max = scaled.max(axis=0, keepdims=True)
-    exp_shifted = np.exp(scaled - row_max)
-    log_partition = np.log(np.maximum(exp_shifted.sum(axis=0, keepdims=True), 1e-12))
-    log_softmax = scaled - row_max - log_partition
-    adjusted = similarities + log_softmax
-    return (-adjusted).astype(np.float32, copy=False)
+    out = np.empty_like(similarities)
+    n_gallery = similarities.shape[1]
+    step = max(int(chunk_cols), 1)
+    for start in range(0, n_gallery, step):
+        end = min(start + step, n_gallery)
+        block = similarities[:, start:end] / scale
+        col_max = block.max(axis=0, keepdims=True)
+        exp_shifted = np.exp(block - col_max)
+        log_partition = np.log(
+            np.maximum(exp_shifted.sum(axis=0, keepdims=True), 1e-12)
+        )
+        log_softmax = block - col_max - log_partition
+        out[:, start:end] = -(similarities[:, start:end] + log_softmax)
+    return out
 
 
 def mean_accuracy(probabilities: np.ndarray, targets: np.ndarray) -> float:
