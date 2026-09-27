@@ -9,7 +9,13 @@ import yaml
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PositiveFloat
 from pydantic.types import NonNegativeInt, PositiveInt
 
-ModelName = Literal["resnet50", "convnext_tiny", "convnext_base", "clip_vit_b16"]
+ModelName = Literal[
+    "resnet50",
+    "convnext_tiny",
+    "convnext_base",
+    "clip_vit_b16",
+    "clip_vit_l14",
+]
 DeviceName = Literal["auto", "cpu", "cuda", "tpu"]
 DistanceName = Literal[
     "l1", "specker", "clear_hard", "nll", "hybrid", "group_categorical"
@@ -71,6 +77,11 @@ class ModelConfig(StrictConfig):
     hard_query_adapter: bool = False
     adapter_dim: PositiveInt = 256
     freeze_backbone: bool = False
+    lora_rank: NonNegativeInt = Field(
+        default=0,
+        description="If >0, inject LoRA on CLIP attention out_proj (PEFT).",
+    )
+    lora_alpha: PositiveFloat = 16.0
 
 
 class DataConfig(StrictConfig):

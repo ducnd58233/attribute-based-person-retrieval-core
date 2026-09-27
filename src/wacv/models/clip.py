@@ -1,8 +1,9 @@
-"""CLIP ViT-B/16 vision tower as an attribute classifier (256x128 crops)."""
+"""CLIP vision towers as attribute classifiers (B/16 @ 256x128, L/14 @ 224x112)."""
 
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 import open_clip
 import torch
@@ -10,18 +11,47 @@ import torch.nn.functional as F
 from torch import nn
 
 from src.wacv.models._common import classification_head
+from src.wacv.models.lora import inject_lora_into_linear
 
-_CLIP_PATCH = 16
-_TARGET_H = 256
-_TARGET_W = 128
+_CLIP_PATCH_B16 = 16
+_CLIP_PATCH_L14 = 14
+_TARGET_H_B16 = 256
+_TARGET_W_B16 = 128
+_TARGET_H_L14 = 224
+_TARGET_W_L14 = 112
+
+
+@dataclass(frozen=True)
+class ClipTowerSpec:
+    """open_clip architecture + crop geometry for positional interpolation."""
+
+    arch: str
+    patch_size: int
+    image_height: int
+    image_width: int
+    pretrained_tag: str = "openai"
+
+
+_CLIP_B16 = ClipTowerSpec(
+    arch="ViT-B-16",
+    patch_size=_CLIP_PATCH_B16,
+    image_height=_TARGET_H_B16,
+    image_width=_TARGET_W_B16,
+)
+_CLIP_L14 = ClipTowerSpec(
+    arch="ViT-L-14",
+    patch_size=_CLIP_PATCH_L14,
+    image_height=_TARGET_H_L14,
+    image_width=_TARGET_W_L14,
+)
 
 
 def interpolate_clip_positional_embedding(
     positional_embedding: torch.Tensor,
     *,
-    height: int = _TARGET_H,
-    width: int = _TARGET_W,
-    patch_size: int = _CLIP_PATCH,
+    height: int = _TARGET_H_B16,
+    width: int = _TARGET_W_B16,
+    patch_size: int = _CLIP_PATCH_B16,
 ) -> torch.Tensor:
     """Resize CLIP patch positional embeddings to a non-square grid.
 
@@ -87,14 +117,32 @@ class ClipAttributeClassifier(nn.Module):
         return self.head(self.encode_features(images))
 
     def freeze_backbone(self) -> None:
-        """Freeze the vision tower (linear-probe stage)."""
-        for parameter in self.visual.parameters():
+        """Freeze the vision tower; keep LoRA adapter weights trainable."""
+        for name, parameter in self.visual.named_parameters():
+            if "lora_" in name:
+                continue
             parameter.requires_grad = False
 
     def unfreeze_backbone(self) -> None:
         """Unfreeze the vision tower (full fine-tune stage)."""
         for parameter in self.visual.parameters():
             parameter.requires_grad = True
+
+    def inject_attention_lora(self, *, rank: int, alpha: float = 16.0) -> int:
+        """Parametrize each attention ``out_proj.weight`` with LoRA; return count.
+
+        Base visual weights stay frozen; only LoRA A/B (and the attribute head)
+        remain trainable. Uses attention out-projections only (fused in_proj is
+        left frozen) so packaging stays peft-free. Parametrization is required
+        because ``MultiheadAttention`` applies ``out_proj`` via ``F.linear`` on
+        ``.weight``, not ``out_proj.forward``.
+        """
+        self.freeze_backbone()
+        replaced = 0
+        for block in self.visual.transformer.resblocks:
+            inject_lora_into_linear(block.attn.out_proj, rank=rank, alpha=alpha)
+            replaced += 1
+        return replaced
 
     def layerwise_param_groups(
         self,
@@ -156,33 +204,55 @@ def build_clip_attribute_classifier(
     num_attributes: int,
     pretrained: bool,
     dropout: float,
-    arch: str = "ViT-B-16",
-    pretrained_tag: str = "openai",
-    image_height: int = _TARGET_H,
-    image_width: int = _TARGET_W,
+    tower: ClipTowerSpec = _CLIP_B16,
+    lora_rank: int = 0,
+    lora_alpha: float = 16.0,
 ) -> ClipAttributeClassifier:
-    """Build CLIP ViT-B/16 with pos embeddings for height x width crops."""
+    """Build a CLIP vision tower with pos embeddings for the tower crop size."""
     model, _, _ = open_clip.create_model_and_transforms(
-        arch,
-        pretrained=pretrained_tag if pretrained else None,
+        tower.arch,
+        pretrained=tower.pretrained_tag if pretrained else None,
     )
     visual = model.visual
     if not hasattr(visual, "positional_embedding"):
-        raise TypeError(f"{arch} visual has no positional_embedding")
+        raise TypeError(f"{tower.arch} visual has no positional_embedding")
     resized = interpolate_clip_positional_embedding(
         visual.positional_embedding.data,
-        height=image_height,
-        width=image_width,
+        height=tower.image_height,
+        width=tower.image_width,
+        patch_size=tower.patch_size,
     )
     visual.positional_embedding = nn.Parameter(resized)
-    visual.image_size = (image_height, image_width)
+    visual.image_size = (tower.image_height, tower.image_width)
     with torch.inference_mode():
-        probe = torch.zeros(1, 3, image_height, image_width)
+        probe = torch.zeros(1, 3, tower.image_height, tower.image_width)
         feature_dim = int(visual(probe).shape[-1])
     head = classification_head(feature_dim, num_attributes, dropout)
-    return ClipAttributeClassifier(
+    classifier = ClipAttributeClassifier(
         visual,
         head,
         feature_dim=feature_dim,
-        image_size=(image_height, image_width),
+        image_size=(tower.image_height, tower.image_width),
+    )
+    if lora_rank > 0:
+        classifier.inject_attention_lora(rank=lora_rank, alpha=lora_alpha)
+    return classifier
+
+
+def build_clip_vit_l14(
+    *,
+    num_attributes: int,
+    pretrained: bool,
+    dropout: float,
+    lora_rank: int = 16,
+    lora_alpha: float = 16.0,
+) -> ClipAttributeClassifier:
+    """CLIP ViT-L/14 at 224x112 with attention out_proj LoRA (PromptPAR-lite)."""
+    return build_clip_attribute_classifier(
+        num_attributes=num_attributes,
+        pretrained=pretrained,
+        dropout=dropout,
+        tower=_CLIP_L14,
+        lora_rank=lora_rank,
+        lora_alpha=lora_alpha,
     )
