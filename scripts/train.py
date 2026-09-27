@@ -143,7 +143,7 @@ def main() -> None:
     from src.wacv.config import load_config
     from src.wacv.engine import Trainer, resolve_device, seed_everything
     from src.wacv.models import build_model
-    from src.wacv.tracking import RunTracker
+    from src.wacv.monitoring.tracking import RunTracker
 
     config = load_config(parse_args().config)
     seed_everything(config.run.seed)

@@ -46,11 +46,6 @@ def load_queries(csv_path: Path) -> np.ndarray:
     return pd.read_csv(csv_path, comment="#", header=None).to_numpy(dtype=np.int64)
 
 
-def load_query_ids(csv_path: Path) -> pd.DataFrame:
-    """Load an ids.csv: `image`, `query_id` (row index into that split's queries)."""
-    return pd.read_csv(csv_path, names=["image", "query_id"], header=None)
-
-
 class AttributeDataset(Dataset):
     """One pedestrian image and its attribute vector (order from gt columns)."""
 

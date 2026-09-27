@@ -50,7 +50,7 @@ class RunTracker:
         self.metrics_path = self.run_dir / "metrics.jsonl"
         self.logger = self._build_logger()
 
-        root = Path(__file__).resolve().parents[2]
+        root = Path(__file__).resolve().parents[3]
         config_path = self.run_dir / "config.json"
         config_path.write_text(
             json.dumps(_record_config(config, root), indent=2) + "\n",
