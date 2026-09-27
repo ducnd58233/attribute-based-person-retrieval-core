@@ -1,24 +1,18 @@
-"""Push a training run to a Kaggle GPU kernel, wait for it, pull it back.
+"""Kaggle GPU-kernel backend for scripts/remote-training.py.
 
-Usage:
-  uv run python scripts/kaggle_train.py --config configs/smoke.yml --stage-only
-  uv run python scripts/kaggle_train.py --config configs/convnext_baseline.yml
+Persistence is the kernel running server-side on Kaggle once pushed,
+independent of this process or this machine staying up; polling here is
+only for reporting/download timing, not for keeping the kernel alive.
 
-``--stage-only`` builds the staging folder (which AST-parses every reachable
-stage script and ``src/wacv`` module) and exits, needing no ``kaggle`` CLI or
-credentials — this is what AGENTS.md's notebook/remote-path check rule runs.
-Without it, this pushes a real Kaggle kernel: persistence is the kernel
-running server-side on Kaggle once pushed, independent of this process or
-this machine staying up; polling here is only for reporting/download timing.
-
-See AGENTS.md "Remote GPU training (Kaggle, Colab)" for the full walkthrough,
-including where credentials come from and what this never does (never clones
-this private repo from inside the kernel; never commits credentials).
+Never clones this private repo from inside the kernel (would need a
+checked-in token) - stages a self-contained folder instead (see
+src/wacv/remote/stage.py).
 """
 
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import shutil
@@ -27,16 +21,18 @@ import time
 from pathlib import Path
 from typing import Final
 
-from remote_stage import ROOT, build_staging_dir
+from src.wacv.remote.stage import ROOT, build_staging_dir
 
-STAGING_DIR: Final[Path] = ROOT / "build" / "kaggle-kernel"
-OUTPUT_DIR: Final[Path] = ROOT / "build" / "kaggle-kernel-output"
+STAGING_DIR: Final[Path] = ROOT / "build" / "remote-kaggle"
+OUTPUT_DIR: Final[Path] = ROOT / "build" / "remote-kaggle-output"
 _TERMINAL_OK: Final[tuple[str, ...]] = ("complete",)
 _TERMINAL_FAIL: Final[tuple[str, ...]] = ("error", "cancel")
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
+def register(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser(
+        "kaggle", help="Push to a Kaggle GPU kernel, wait for it, pull it back"
+    )
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--accelerator", default="NvidiaTeslaT4")
     parser.add_argument("--kaggle-username", default=None)
@@ -54,7 +50,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Build the staging folder and exit; no kaggle CLI or credentials needed.",
     )
-    return parser.parse_args()
+    parser.set_defaults(func=run)
 
 
 def resolve_username(explicit: str | None) -> str:
@@ -70,8 +66,8 @@ def resolve_username(explicit: str | None) -> str:
         if username:
             return str(username)
     raise SystemExit(
-        "no Kaggle username: pass --kaggle-username, set KAGGLE_USERNAME, "
-        "or put one in ~/.kaggle/kaggle.json (see AGENTS.md)"
+        "no Kaggle username: pass --kaggle-username, set KAGGLE_USERNAME "
+        "(e.g. via .env, see .env.example), or put one in ~/.kaggle/kaggle.json"
     )
 
 
@@ -139,7 +135,7 @@ def wait_for_terminal_status(
 
 
 def pull_run_into_local(output_dir: Path, run_name: str) -> Path | None:
-    for candidate in output_dir.rglob(run_name):
+    for candidate in output_dir.rglob(glob.escape(run_name)):
         if candidate.is_dir() and candidate.parent.name == "runs":
             destination = ROOT / "runs" / run_name
             destination.mkdir(parents=True, exist_ok=True)
@@ -148,8 +144,7 @@ def pull_run_into_local(output_dir: Path, run_name: str) -> Path | None:
     return None
 
 
-def main() -> None:
-    args = parse_args()
+def run(args: argparse.Namespace) -> None:
     result = build_staging_dir(args.config, STAGING_DIR)
     print(f"staged {result.staging_dir} (run={result.run_name})")
 
@@ -159,7 +154,7 @@ def main() -> None:
     if shutil.which("kaggle") is None:
         raise SystemExit(
             "kaggle CLI not on PATH; `uv sync` after adding it to the dev "
-            "group, or `uv run python scripts/kaggle_train.py ...`"
+            "group, or `uv run python scripts/remote-training.py kaggle ...`"
         )
 
     username = resolve_username(args.kaggle_username)
@@ -205,7 +200,3 @@ def main() -> None:
         )
 
     print(f"done: {landed}")
-
-
-if __name__ == "__main__":
-    main()

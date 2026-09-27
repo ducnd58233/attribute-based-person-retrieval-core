@@ -125,56 +125,59 @@ here.
   `Path(__file__)` to a *stage script*'s top level. When in doubt, check
   which mechanism applies (inlined script body vs. `%%writefile`+`import`)
   before changing either direction.
-- **Remote GPU training: Kaggle first, Colab second (MUST):** headless
-  `Download → Train → Eval → Visualize → Package` runs on hosted GPUs go
-  through `scripts/kaggle_train.py` (primary) or `scripts/colab_train.py`
-  (secondary), never a hand-written one-off. Both build on
-  `scripts/remote_stage.py`, which reuses `export-colab-notebook.py`'s own
+- **Remote GPU training: one entrypoint, one backend per hosted provider
+  (MUST):** headless `Download → Train → Eval → Visualize → Package` runs
+  on hosted GPUs go through `scripts/remote-training.py <backend> --config
+  ...`, never a hand-written one-off. `<backend>` is `kaggle` (primary —
+  cross-platform including native Windows; a pushed kernel runs
+  server-side, so it survives a closed laptop) or `colab` (secondary —
+  `google-colab-cli`, **Linux/macOS only**, run from WSL2 on Windows;
+  `colab exec` blocks the local process for the whole run, so use
+  `tmux`/`nohup` for one that must outlive a closed terminal, or prefer
+  Kaggle). Add a third hosted provider by dropping a module under
+  `src/wacv/remote/` that exposes a `register(subparsers)` function (same
+  shape as `kaggle.py`/`colab.py`) and listing it in
+  `scripts/remote-training.py`'s `BACKENDS`; do not add a second top-level
+  script.
+
+  Every backend builds on `src/wacv/remote/stage.py`, which reuses
+  `scripts/export-colab-notebook.py`'s own
   `stages_for_config`/`visualize_stage`/`experiment_identity` so the
-  notebook path and these two headless paths cannot silently drift apart.
-  Neither script needs this private repo to be `git clone`d from inside the
-  remote sandbox — both stage a self-contained folder (this repo's
-  `scripts/` + `src/wacv/` + one experiment YAML, never `data/`) and ship
-  that instead.
-
-  **Kaggle** (primary — cross-platform including native Windows; a pushed
-  kernel runs server-side, so it survives a closed laptop):
+  notebook path and every headless backend stay in sync. None of them need
+  this private repo to be `git clone`d from inside the remote sandbox —
+  each stages a self-contained folder (this repo's `scripts/` + `src/wacv/`
+  + one experiment YAML, never `data/`) and ships that instead.
 
   ```sh
-  uv sync                              # pulls `kaggle` from the dev group
-  # one-time auth: https://www.kaggle.com/settings -> Create New Token,
-  # save the download as ~/.kaggle/kaggle.json (never commit it)
-  uv run python scripts/kaggle_train.py --config configs/<name>.yml
+  uv sync                                        # pulls kaggle+packaging from dev
+  cp .env.example .env                           # fill in KAGGLE_USERNAME/KAGGLE_KEY
+  # https://www.kaggle.com/settings -> Create New Token gives both
+  uv run python scripts/remote-training.py kaggle --config configs/<name>.yml
+
+  uv tool install google-colab-cli               # once per machine, not a project dep
+  uv run python scripts/remote-training.py colab --config configs/<name>.yml --gpu T4
   ```
 
-  This pushes a `script`-type kernel (`enable_gpu`, `enable_internet` both
-  on), polls `kaggle kernels status` until it reaches a terminal state (no
-  local timeout unless `--timeout-hours` is passed — closing this terminal
-  does not stop the kernel), then runs `kaggle kernels output` and copies
-  the result into local `runs/<run_name>/`. `--stage-only` builds the
-  staging folder and exits without needing the `kaggle` CLI, credentials,
-  or network access at all.
+  `remote-training.py` loads `.env` (gitignored; copy from `.env.example`,
+  never commit it) into the environment at startup, without overriding a
+  real env var already set — `KAGGLE_USERNAME`/`KAGGLE_KEY` reach the
+  `kaggle` CLI subprocess that way, and this repo's own code never reads
+  the key value, only ever `username` when falling back to the
+  home-directory file *~/.kaggle/kaggle.json*.
 
-  **Colab** (secondary — `google-colab-cli`, `uv tool install
-  google-colab-cli`, supports **Linux/macOS only**; run from WSL2 on
-  Windows, or use Kaggle instead). Unlike Kaggle, `colab exec` blocks this
-  process in the foreground for the whole run — the local machine must stay
-  up (use `tmux`/`nohup` for a run that must outlive a closed terminal):
+  `--stage-only` on either backend builds the staging folder and exits
+  without needing that backend's CLI, credentials, or network access at all. The Kaggle backend pushes a `script`-type
+  kernel (`enable_gpu`, `enable_internet` both on) and polls `kaggle
+  kernels status` until terminal (no local timeout unless `--timeout-hours`
+  is passed), then `kaggle kernels output`s into local `runs/<run_name>/`.
+  The Colab backend runs `colab new → upload → exec → download → stop`
+  (`stop` always runs, even on failure, so a failed run doesn't leave a
+  billed GPU session up).
 
-  ```sh
-  uv tool install google-colab-cli     # once per machine, not a project dep
-  uv run python scripts/colab_train.py --config configs/<name>.yml --gpu T4
-  ```
-
-  This runs `colab new → upload → exec → download → stop` (`stop` always
-  runs, even on failure, so a failed run doesn't leave a billed GPU session
-  up). `--stage-only` works the same as Kaggle's, needing no `colab` CLI or
-  Google auth.
-
-  Both scripts read credentials only from each CLI's own standard location
-  (Kaggle: the home-directory files *~/.kaggle/kaggle.json* or
-  *~/.kaggle/access_token*, or `KAGGLE_USERNAME`/`KAGGLE_KEY`; Colab: its
-  own OAuth/ADC flow) — never from a repo file, and never printed.
+  **Staged experiment configs must stay secret-free** (no API keys, W&B
+  tokens, or similar in a `configs/*.yml`) — the staging folder ships that
+  YAML verbatim to a third-party sandbox (Kaggle/Colab), and nothing here
+  scans it for embedded secrets.
 - **Notebook and remote-path check, after touching training code (MUST):**
   any change to `scripts/*.py` or `src/wacv/**` regenerates and
   re-validates every path that ships that code before the change counts as
@@ -182,20 +185,21 @@ here.
 
   ```sh
   uv run python scripts/export-colab-notebook.py --config configs/<touched-experiment>.yml
-  uv run python scripts/kaggle_train.py --config configs/<touched-experiment>.yml --stage-only
-  uv run python scripts/colab_train.py  --config configs/<touched-experiment>.yml --stage-only
+  uv run python scripts/remote-training.py kaggle --config configs/<touched-experiment>.yml --stage-only
+  uv run python scripts/remote-training.py colab  --config configs/<touched-experiment>.yml --stage-only
   ```
 
   All three fail loudly (non-zero exit) on a syntax error or an unresolved
-  `src.wacv` import anywhere in the reachable pipeline — `--stage-only`
-  needs no Kaggle/Colab credentials, so there is no excuse to skip it. When
-  the change touches shared code (`src/wacv/engine.py`, `data.py`, and
-  similar) rather than one experiment, run the three commands against
-  `configs/smoke.yml` instead of picking one experiment arbitrarily. This is
-  a syntax/import check, not a substitute for the deeper, already-documented
-  bounded smoke run (`uv run python scripts/train.py --config
-  configs/smoke.yml`) when the change might affect runtime behavior, not
-  just imports.
+  `src.wacv` import anywhere in the reachable pipeline, and `--stage-only`
+  also compiles the generated `run_remote.py` entrypoint itself before
+  writing it — needs no Kaggle/Colab credentials, so there is no excuse to
+  skip it. When the change touches shared code (`src/wacv/engine.py`,
+  `data.py`, and similar) rather than one experiment, run the three
+  commands against `configs/smoke.yml` instead of picking one experiment
+  arbitrarily. This is a syntax/import check, not a substitute for the
+  deeper, already-documented bounded smoke run (`uv run python
+  scripts/train.py --config configs/smoke.yml`) when the change might
+  affect runtime behavior, not just imports.
 
 </always_on>
 
@@ -229,9 +233,9 @@ here.
   rules.
 - Add code to `run.py`/the submission entry point that reaches the network
   at inference time.
-- Commit Kaggle/Colab credentials (`kaggle.json`, `access_token`, OAuth
-  config) anywhere in this repo, or `git clone` this repo from inside a
-  Kaggle kernel or Colab VM (stage a self-contained folder instead —
-  `scripts/remote_stage.py`).
+- Commit Kaggle/Colab credentials (`.env`, `kaggle.json`, `access_token`,
+  OAuth config) anywhere in this repo, or `git clone` this repo from inside
+  a Kaggle kernel or Colab VM (stage a self-contained folder instead —
+  `src/wacv/remote/stage.py`).
 
 </delivery_gates>

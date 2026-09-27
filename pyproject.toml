@@ -26,6 +26,7 @@ dev = [
     "black>=26.5.1",
     "gdown>=5.2.0,<6",
     "kaggle>=1.7.4",
+    "packaging>=24.0",
     "pre-commit>=4.6.2",
     "pyright>=1.1.414",
     "pytest>=8.4.0",
