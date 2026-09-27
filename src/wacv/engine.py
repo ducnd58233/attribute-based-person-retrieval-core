@@ -214,6 +214,7 @@ class Trainer:
             self.device,
             self.config.ranking,
             progress=False,
+            inference_config=self.config.inference,
         )
 
     @staticmethod

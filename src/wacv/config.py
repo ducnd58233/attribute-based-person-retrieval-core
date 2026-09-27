@@ -9,9 +9,17 @@ import yaml
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PositiveFloat
 from pydantic.types import NonNegativeInt, PositiveInt
 
-ModelName = Literal["resnet50", "convnext_tiny", "convnext_base"]
+ModelName = Literal["resnet50", "convnext_tiny", "convnext_base", "clip_vit_b16"]
 DeviceName = Literal["auto", "cpu", "cuda", "tpu"]
-DistanceName = Literal["l1", "specker", "clear_hard"]
+DistanceName = Literal[
+    "l1", "specker", "clear_hard", "nll", "hybrid", "group_categorical"
+]
+GroupMode = Literal["independent", "categorical"]
+CalibrationMode = Literal["none", "per_attribute"]
+QueryNorm = Literal["none", "dual_softmax"]
+TTAView = Literal["identity", "hflip", "scale_crop"]
+DomainName = Literal["PA100k", "PETA", "Market1501"]
+EvalProtocol = Literal["id_val", "lodo_m"]
 
 
 def _path_from_yaml(value: object) -> object:
@@ -19,6 +27,18 @@ def _path_from_yaml(value: object) -> object:
 
 
 ConfigPath = Annotated[Path, BeforeValidator(_path_from_yaml)]
+
+
+def _image_size_from_yaml(value: object) -> object:
+    """Accept YAML lists as (H, W) tuples."""
+    if isinstance(value, list) and len(value) == 2:
+        return (value[0], value[1])
+    return value
+
+
+ImageSize = Annotated[
+    tuple[PositiveInt, PositiveInt], BeforeValidator(_image_size_from_yaml)
+]
 
 
 def _resume_from_yaml(value: object) -> object:
@@ -50,6 +70,7 @@ class ModelConfig(StrictConfig):
     dropout: float = Field(default=0.0, ge=0.0, lt=1.0)
     hard_query_adapter: bool = False
     adapter_dim: PositiveInt = 256
+    freeze_backbone: bool = False
 
 
 class DataConfig(StrictConfig):
@@ -58,6 +79,9 @@ class DataConfig(StrictConfig):
     num_workers: NonNegativeInt = 4
     limit: PositiveInt | None = None
     train_augmentation: bool = True
+    train_domains: list[DomainName] | None = None
+    eval_domains: list[DomainName] | None = None
+    image_size: ImageSize = (256, 128)
 
 
 class OptimizationConfig(StrictConfig):
@@ -75,6 +99,18 @@ class OptimizationConfig(StrictConfig):
     focal_gamma: float = Field(default=0.0, ge=0.0, le=5.0)
     query_match_weight: float = Field(default=0.0, ge=0.0, le=5.0)
     query_match_temperature: PositiveFloat = 0.07
+    lp_ft: bool = Field(
+        default=False,
+        description="Two-stage linear-probe then full fine-tune schedule.",
+    )
+    lp_epochs: PositiveInt = 2
+    lp_learning_rate: PositiveFloat = 1e-3
+    layer_decay: float = Field(
+        default=0.65,
+        gt=0.0,
+        le=1.0,
+        description="Layer-wise LR decay for ViT FT (deeper layers keep higher LR).",
+    )
 
 
 class RunConfig(StrictConfig):
@@ -87,11 +123,50 @@ class RunConfig(StrictConfig):
     progress: bool = True
 
 
+class InferenceConfig(StrictConfig):
+    """Test-time prediction options (no training side effects)."""
+
+    tta: list[TTAView] = Field(
+        default_factory=lambda: ["identity"],
+        description="Views to average probabilities over: identity, hflip, "
+        "scale_crop (1.15x bilinear upsample then center-crop).",
+    )
+    tta_scale: PositiveFloat = Field(
+        default=1.15,
+        description="Upsample factor for the scale_crop TTA view.",
+    )
+
+
 class RankingConfig(StrictConfig):
     """How gallery attribute probabilities become query distances."""
 
     distance: DistanceName = "l1"
     temperature: PositiveFloat = 1.5
+    alpha: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Weight on NLL term when distance=hybrid (rest is L1).",
+    )
+    group_mode: GroupMode = Field(
+        default="independent",
+        description="When categorical, exclusive groups use categorical NLL "
+        "(multi-hot falls back to Bernoulli).",
+    )
+    calibration: CalibrationMode = Field(
+        default="none",
+        description="per_attribute fits one temperature per bit on ID-val "
+        "(or in-domain val for LODO-M) and stores assets/calibration.json.",
+    )
+    query_norm: QueryNorm = Field(
+        default="none",
+        description="dual_softmax: S' = S + log_softmax over queries per gallery "
+        "(no labels; InfoNCE-style hubness reduction).",
+    )
+    query_norm_tau: PositiveFloat = Field(
+        default=0.05,
+        description="Temperature for dual_softmax column softmax.",
+    )
     clear_fusion: float = Field(
         default=0.5,
         ge=0.0,
@@ -106,6 +181,7 @@ class ExperimentConfig(StrictConfig):
     data: DataConfig = DataConfig()
     optimization: OptimizationConfig = OptimizationConfig()
     ranking: RankingConfig = RankingConfig()
+    inference: InferenceConfig = InferenceConfig()
     run: RunConfig
 
 

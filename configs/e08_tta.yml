@@ -1,0 +1,38 @@
+model:
+  name: convnext_base
+  pretrained: true
+  dropout: 0.1
+
+data:
+  root: data
+  batch_size: 32
+  num_workers: 4
+  limit: null
+  train_augmentation: true
+
+optimization:
+  epochs: 1
+  learning_rate: 0.0001
+  weight_decay: 0.01
+
+run:
+  name: e08_tta
+  output_dir: runs
+  resume: false
+  seed: 42
+  device: auto
+  progress: true
+
+ranking:
+  distance: hybrid
+  temperature: 1.0
+  alpha: 0.5
+  query_norm: dual_softmax
+  query_norm_tau: 0.05
+
+inference:
+  tta:
+    - identity
+    - hflip
+    - scale_crop
+  tta_scale: 1.15
