@@ -74,3 +74,25 @@ def hard_query_infonce(
     logits = gallery_embeddings @ query_embeddings.T / temperature
     labels = torch.arange(logits.shape[0], device=logits.device)
     return F.cross_entropy(logits, labels)
+
+
+def logit_adjustment_offset(prior: torch.Tensor) -> torch.Tensor:
+    """Return log(prior / (1 - prior)) per attribute (Menon et al. 2021)."""
+    rates = prior.detach().float().clamp(1e-6, 1.0 - 1e-6)
+    return torch.log(rates) - torch.log1p(-rates)
+
+
+class LogitAdjustedLoss(nn.Module):
+    """Apply a fixed logit offset during training, then delegate to ``base``.
+
+    At evaluation the model emits raw logits (neutral prior), matching H10.
+    """
+
+    def __init__(self, base: nn.Module, offset: torch.Tensor) -> None:
+        super().__init__()
+        self.base = base
+        self.register_buffer("offset", offset.detach().float())
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """BCE (or focal) on ``logits + offset``."""
+        return self.base(logits + self.offset, targets)
