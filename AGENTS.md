@@ -82,6 +82,17 @@ here.
   `pyproject.toml` ignore / per-file-ignore lists to land a change. Fix the
   code (or the typed API) so the existing rules pass. Prefer deferred
   `src.wacv` imports inside functions in `scripts/` over path-hack `# noqa`.
+- **A function signature over `max-args` takes an existing config object,
+  not a suppress (MUST):** when extracting a shared helper pushes a
+  signature past `pyproject.toml`'s `[tool.ruff.lint.pylint] max-args`
+  limit, look for a config object the callers already have in hand
+  (`ExperimentConfig`, `RankingConfig`, ...) before adding parameters one
+  at a time. This actually happened extracting `compute_ranking_metrics`
+  into `src/wacv/evaluation/__init__.py`: three scalar parameters
+  (`distance`, `temperature`, `clear_fusion`) pushed it to 9 args and
+  failed `PLR0913`; both call sites already had the `RankingConfig` those
+  three fields live on, so the fix was accepting that object instead of
+  suppressing the rule or leaving the extraction unwritten.
 - **`scripts/` file naming: `-`, never `_` (MUST):** every file directly
   under `scripts/` uses hyphens (`export-colab-notebook.py`,
   `sweep-ranking-distance.py`), matching the CLI-entrypoint convention
@@ -103,6 +114,25 @@ here.
   acceptance criteria require. Prefer a script under `scripts/` over new
   packages, fixtures, or README sections. Delete scaffolding that is not
   needed for train / evaluate / package / submit.
+- **Grep the whole repo before deleting a function or class as dead
+  (MUST):** "looks unused in this file" is not evidence. Search every
+  `src/`, `scripts/`, `tests/`, and `submission/` file for the exact name
+  before removing it, and note in the PR description (or commit body)
+  that the search came back empty. `data.py::load_query_ids` and
+  `query_adapter.py::unwrap_backbone` were removed this way - a
+  same-file-only look would have missed that `scripts/export-colab-
+  notebook.py`'s AST-walk-based inlining is also a real caller for some
+  functions, which a narrower search would not have ruled out.
+- **The same predict/rank/score (or similar) sequence in two files gets
+  extracted immediately, not on a later cleanup pass (MUST):** if writing
+  a second copy of logic that already exists elsewhere in the codebase,
+  stop and extract a shared function in the same change, into whichever
+  module already owns that concern (see the folder-layout-by-concern rule
+  above). `Trainer._ranking_metrics` (`engine.py`) and `scripts/
+  evaluate.py`'s `_evaluate_checkpoint` independently reimplemented the
+  same predict → rank → score sequence across several earlier PRs before
+  one refactor finally noticed and extracted `compute_ranking_metrics` -
+  the second copy should never have been written standalone.
 - **No decorative runtime strings (MUST):** do not add print/log messages
   whose only job is to narrate that a check "passed cleanly" or similar
   fluff (e.g. `run.py imports cleanly with no network access`). Docker /
@@ -142,6 +172,16 @@ here.
   `Path(__file__)` to a *stage script*'s top level. When in doubt, check
   which mechanism applies (inlined script body vs. `%%writefile`+`import`)
   before changing either direction.
+- **Moving a file changes its `Path(__file__).resolve().parents[N]` index
+  (MUST):** the index counts directories between the file and the repo
+  root, so moving a file one level deeper (e.g. into a new subpackage)
+  means every `parents[N]` call in it needs `N + 1`, not the same number.
+  Nothing in ruff/pyright/black catches a now-wrong-but-still-valid index;
+  check every file at the *new* depth for what index they already use
+  (`src/wacv/remote/stage.py` uses `parents[3]`) before assuming the old
+  number still applies. Moving `tracking.py` into `src/wacv/monitoring/`
+  left `parents[2]` silently resolving to the wrong root until this was
+  caught by that cross-check, not by any tool.
 - **Remote GPU training: one entrypoint, one backend per hosted provider
   (MUST):** headless `Download → Train → Eval → Visualize → Package` runs
   on hosted GPUs go through `scripts/remote-training.py <backend> --config
@@ -181,6 +221,24 @@ here.
   `kaggle` CLI subprocess that way, and this repo's own code never reads
   the key value, only ever `username` when falling back to the
   home-directory file *~/.kaggle/kaggle.json*.
+
+  **Colab with no human present (verified):** `colab`'s default
+  `--auth adc` uses Google's Application Default Credentials. A human
+  runs, once, on any machine with a browser (does not have to be the
+  agent's machine): `gcloud auth application-default login
+  --no-launch-browser` — this prints a URL plus a device code, completes
+  consent wherever the browser is, and writes a JSON credentials file to
+  a well-known path (*~/.config/gcloud/application_default_credentials.json*
+  on Linux/macOS). Every later `colab` invocation reuses that file
+  automatically, with zero further interaction — this is ADC's documented
+  contract, not something this repo adds. Point `GOOGLE_APPLICATION_
+  CREDENTIALS` in `.env` at a copy of that file and no code change is
+  needed: `env.py::load_dotenv` forwards it into `os.environ` like any
+  other `.env` line, and `subprocess.run` already inherits the parent
+  environment. **`UNVERIFIED`:** whether Colab's own runtime-provisioning
+  quota accepts a service-account identity — only tested against a
+  personal Google account's own ADC file; use the human's own account's
+  credentials, not a separate service account, until that is confirmed.
 
   `--stage-only` on either backend builds the staging folder and exits
   without needing that backend's CLI, credentials, or network access at all. The Kaggle backend pushes a `script`-type

@@ -195,6 +195,31 @@ uv run python scripts/remote-training.py colab  --config configs/convnext_baseli
 | `--gpu` | no | `T4` | Colab GPU type. |
 | `--session` | no | `wacv-train` | `google-colab-cli` session name. |
 
+#### Credentials (one-time setup)
+
+**Kaggle:** go to https://www.kaggle.com/settings → "Create New Token" →
+downloads `kaggle.json` with your `username` and `key`. Either paste both
+into `.env` as `KAGGLE_USERNAME` / `KAGGLE_KEY`, or drop the file at
+*~/.kaggle/kaggle.json* (the CLI's own default location) — `.env` is
+enough on its own, the file is only a fallback.
+
+**Colab:** run once, on any machine with a browser (does not have to be
+the machine that will run `remote-training.py`):
+
+```sh
+gcloud auth application-default login --no-launch-browser
+```
+
+This prints a URL and a device code; finish the consent flow wherever the
+browser is, then paste the code back. It writes a credentials file to
+*~/.config/gcloud/application_default_credentials.json* (Linux/macOS) or
+*%APPDATA%\gcloud\application_default_credentials.json* (Windows). Copy
+that file somewhere the training machine/agent can read it, then set
+`GOOGLE_APPLICATION_CREDENTIALS` in `.env` to that path — every later
+`colab` invocation reuses it automatically, with no further login. Use
+your own personal Google account for this, not a service account
+(`UNVERIFIED` whether Colab's runtime quota accepts one).
+
 ```sh
 # check it can still run, no credentials needed
 uv run python scripts/remote-training.py kaggle --config configs/smoke.yml --stage-only
