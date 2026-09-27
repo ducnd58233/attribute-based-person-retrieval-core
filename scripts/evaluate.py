@@ -127,7 +127,14 @@ def _evaluate_protocol(
         AttributeDataset(
             ground_truth,
             config.data.root,
-            transforms_for_model(config.model.name, train=False),
+            transforms_for_model(
+                config.model.name,
+                train=False,
+                image_size=(
+                    int(config.data.image_size[0]),
+                    int(config.data.image_size[1]),
+                ),
+            ),
             attribute_names=attribute_names,
         ),
         batch_size=config.data.batch_size,

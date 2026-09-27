@@ -59,12 +59,19 @@ def build_loaders(
         train_gt = train_gt.iloc[: config.data.limit]
         val_gt = val_gt.iloc[: config.data.limit]
 
+    image_size = (int(config.data.image_size[0]), int(config.data.image_size[1]))
     train_transform = transforms_for_model(
-        config.model.name, train=config.data.train_augmentation
+        config.model.name,
+        train=config.data.train_augmentation,
+        image_size=image_size,
     )
     if not config.data.train_augmentation:
-        train_transform = transforms_for_model(config.model.name, train=False)
-    eval_transform = transforms_for_model(config.model.name, train=False)
+        train_transform = transforms_for_model(
+            config.model.name, train=False, image_size=image_size
+        )
+    eval_transform = transforms_for_model(
+        config.model.name, train=False, image_size=image_size
+    )
     train_dataset = AttributeDataset(
         train_gt, config.data.root, train_transform, attribute_names=attribute_names
     )
@@ -137,7 +144,14 @@ def build_ranking_eval(
         AttributeDataset(
             ground_truth,
             config.data.root,
-            transforms_for_model(config.model.name, train=False),
+            transforms_for_model(
+                config.model.name,
+                train=False,
+                image_size=(
+                    int(config.data.image_size[0]),
+                    int(config.data.image_size[1]),
+                ),
+            ),
             attribute_names=attribute_names,
         ),
         batch_size=config.data.batch_size,

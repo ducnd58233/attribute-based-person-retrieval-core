@@ -29,6 +29,18 @@ def _path_from_yaml(value: object) -> object:
 ConfigPath = Annotated[Path, BeforeValidator(_path_from_yaml)]
 
 
+def _image_size_from_yaml(value: object) -> object:
+    """Accept YAML lists as (H, W) tuples."""
+    if isinstance(value, list) and len(value) == 2:
+        return (value[0], value[1])
+    return value
+
+
+ImageSize = Annotated[
+    tuple[PositiveInt, PositiveInt], BeforeValidator(_image_size_from_yaml)
+]
+
+
 def _resume_from_yaml(value: object) -> object:
     """Accept null/false (off), true (auto last.pt), or a path string."""
     if value is True:
@@ -69,6 +81,7 @@ class DataConfig(StrictConfig):
     train_augmentation: bool = True
     train_domains: list[DomainName] | None = None
     eval_domains: list[DomainName] | None = None
+    image_size: ImageSize = (256, 128)
 
 
 class OptimizationConfig(StrictConfig):
