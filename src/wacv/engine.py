@@ -20,16 +20,10 @@ from tqdm.contrib.logging import logging_redirect_tqdm
 
 from src.wacv.checkpoint import CheckpointManager
 from src.wacv.config import DeviceName, ExperimentConfig
-from src.wacv.evaluation import (
-    mean_accuracy,
-    predict_gallery_embeddings,
-    predict_probabilities,
-    ranking_distance,
-)
+from src.wacv.evaluation import compute_ranking_metrics
 from src.wacv.losses import hard_query_infonce
-from src.wacv.metrics import evaluate_ranking
+from src.wacv.monitoring.tracking import RunTracker
 from src.wacv.query_adapter import AttributeModelWithHardQuery
-from src.wacv.tracking import RunTracker
 
 BatchIterable = Iterable[tuple[torch.Tensor, torch.Tensor]]
 
@@ -212,47 +206,16 @@ class Trainer:
         return total_loss / total_samples
 
     def _ranking_metrics(self, ranking: RankingEvalData) -> dict[str, float]:
-        probabilities = predict_probabilities(
+        return compute_ranking_metrics(
             self.ema_model,
             ranking.gallery_loader,
-            self.device,
-            progress=False,
-            tta=self.config.inference.tta,
-            tta_scale=float(self.config.inference.tta_scale),
-        )
-        gallery_embeddings: np.ndarray | None = None
-        query_embeddings: np.ndarray | None = None
-        if self.config.ranking.distance == "clear_hard":
-            gallery_embeddings = predict_gallery_embeddings(
-                self.ema_model,
-                ranking.gallery_loader,
-                self.device,
-                progress=False,
-            )
-            root = getattr(self.ema_model, "module", self.ema_model)
-            if not isinstance(root, AttributeModelWithHardQuery):
-                raise TypeError("clear_hard requires AttributeModelWithHardQuery")
-            query_tensor = torch.as_tensor(
-                ranking.queries, dtype=torch.float32, device=self.device
-            )
-            with torch.inference_mode():
-                query_embeddings = root.query_embeddings(query_tensor).cpu().numpy()
-        metrics = evaluate_ranking(
             ranking.queries,
             ranking.gallery_attrs,
-            ranking_distance(
-                ranking.queries,
-                probabilities,
-                distance=self.config.ranking.distance,
-                temperature=self.config.ranking.temperature,
-                alpha=self.config.ranking.alpha,
-                gallery_embeddings=gallery_embeddings,
-                query_embeddings=query_embeddings,
-                clear_fusion=self.config.ranking.clear_fusion,
-            ),
+            self.device,
+            self.config.ranking,
+            progress=False,
+            inference_config=self.config.inference,
         )
-        metrics["mA"] = mean_accuracy(probabilities, ranking.gallery_attrs)
-        return metrics
 
     @staticmethod
     def _update_best(

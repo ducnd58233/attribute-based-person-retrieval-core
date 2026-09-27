@@ -120,14 +120,21 @@ def _evaluate_protocol(
         predict_probabilities,
         ranking_distance,
     )
-    from src.wacv.metrics import evaluate_ranking
+    from src.wacv.monitoring.metrics import evaluate_ranking
 
     workers = resolve_num_workers(config.data.num_workers)
     loader = DataLoader(
         AttributeDataset(
             ground_truth,
             config.data.root,
-            transforms_for_model(config.model.name, train=False),
+            transforms_for_model(
+                config.model.name,
+                train=False,
+                image_size=(
+                    int(config.data.image_size[0]),
+                    int(config.data.image_size[1]),
+                ),
+            ),
             attribute_names=attribute_names,
         ),
         batch_size=config.data.batch_size,

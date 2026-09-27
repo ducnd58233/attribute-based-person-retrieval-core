@@ -67,13 +67,12 @@ def _export_weights(
     load_model_weights(checkpoint.resolve(), model, map_location=torch.device("cpu"))
     destination.parent.mkdir(parents=True, exist_ok=True)
     weight_format = "state_dict"
-    image_size = [256, 128]
-    if config.model.name == "clip_vit_l14":
-        image_size = [224, 112]
+    image_h = int(config.data.image_size[0])
+    image_w = int(config.data.image_size[1])
     if config.model.name.startswith("clip_"):
         # TorchScript avoids vendoring open_clip into the eval image.
         model.eval()
-        example = torch.zeros(1, 3, image_size[0], image_size[1])
+        example = torch.zeros(1, 3, image_h, image_w)
         with torch.inference_mode():
             traced = torch.jit.trace(model, example)
         traced.save(str(destination))
@@ -88,7 +87,7 @@ def _export_weights(
         "adapter_dim": int(config.model.adapter_dim),
         "source_checkpoint": str(checkpoint),
         "weight_format": weight_format,
-        "image_size": image_size,
+        "image_size": [image_h, image_w],
         "image_mean": (
             [0.48145466, 0.4578275, 0.40821073]
             if config.model.name.startswith("clip_")

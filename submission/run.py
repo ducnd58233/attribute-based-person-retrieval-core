@@ -442,17 +442,34 @@ def _clear_hard_distance(
     return (1.0 - fusion) * specker + fusion * cosine_distance
 
 
-def _dual_softmax_rerank(distances: np.ndarray, tau: float) -> np.ndarray:
-    """S' = S + log_softmax_queries(S/tau); return -S'. No labels / updates."""
-    similarities = -distances.astype(np.float64)
+def _dual_softmax_rerank(
+    distances: np.ndarray,
+    tau: float,
+    *,
+    chunk_cols: int = 4096,
+) -> np.ndarray:
+    """S' = S + log_softmax_queries(S/tau); return -S'.
+
+    Softmax is column-wise (over queries). Process gallery columns in chunks so
+    a large QxG matrix does not allocate multi-GB float64 temporaries and get
+    the Codabench worker OOM-killed ("Child task failed or non-zero return").
+    """
+    similarities = -np.asarray(distances, dtype=np.float32)
     scale = max(float(tau), 1e-8)
-    scaled = similarities / scale
-    row_max = scaled.max(axis=0, keepdims=True)
-    exp_shifted = np.exp(scaled - row_max)
-    log_partition = np.log(np.maximum(exp_shifted.sum(axis=0, keepdims=True), 1e-12))
-    log_softmax = scaled - row_max - log_partition
-    adjusted = similarities + log_softmax
-    return (-adjusted).astype(np.float32)
+    out = np.empty_like(similarities)
+    n_gallery = similarities.shape[1]
+    step = max(int(chunk_cols), 1)
+    for start in range(0, n_gallery, step):
+        end = min(start + step, n_gallery)
+        block = similarities[:, start:end] / scale
+        col_max = block.max(axis=0, keepdims=True)
+        exp_shifted = np.exp(block - col_max)
+        log_partition = np.log(
+            np.maximum(exp_shifted.sum(axis=0, keepdims=True), 1e-12)
+        )
+        log_softmax = block - col_max - log_partition
+        out[:, start:end] = -(similarities[:, start:end] + log_softmax)
+    return out
 
 
 def _score_gallery_distances(

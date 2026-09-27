@@ -1,0 +1,50 @@
+model:
+  name: convnext_base
+  pretrained: true
+  dropout: 0.1
+
+data:
+  root: data
+  batch_size: 16
+  num_workers: 4
+  limit: null
+  train_augmentation: true
+  train_domains:
+    - PA100k
+    - PETA
+  image_size: [384, 192]
+
+optimization:
+  epochs: 30
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  pos_weight_clip: 10.0
+  amp: true
+  grad_clip_norm: 1.0
+  ema_decay: 0.999
+  scheduler_factor: 0.1
+  scheduler_patience: 3
+  label_smoothing: 0.05
+  early_stop_patience: 4
+
+run:
+  name: e11_res_384
+  output_dir: runs
+  resume: false
+  seed: 42
+  device: auto
+  progress: true
+
+ranking:
+  distance: hybrid
+  temperature: 1.0
+  alpha: 0.5
+  query_norm: dual_softmax
+  query_norm_tau: 0.05
+
+inference:
+  tta:
+    - identity
+    - hflip
+    - scale_crop
+  tta_scale: 1.15

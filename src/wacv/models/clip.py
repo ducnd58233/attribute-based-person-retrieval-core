@@ -129,18 +129,18 @@ class ClipAttributeClassifier(nn.Module):
             parameter.requires_grad = True
 
     def inject_attention_lora(self, *, rank: int, alpha: float = 16.0) -> int:
-        """Replace each attention ``out_proj`` with LoRA; return adapter count.
+        """Parametrize each attention ``out_proj.weight`` with LoRA; return count.
 
         Base visual weights stay frozen; only LoRA A/B (and the attribute head)
         remain trainable. Uses attention out-projections only (fused in_proj is
-        left frozen) so packaging stays peft-free.
+        left frozen) so packaging stays peft-free. Parametrization is required
+        because ``MultiheadAttention`` applies ``out_proj`` via ``F.linear`` on
+        ``.weight``, not ``out_proj.forward``.
         """
         self.freeze_backbone()
         replaced = 0
         for block in self.visual.transformer.resblocks:
-            block.attn.out_proj = inject_lora_into_linear(
-                block.attn.out_proj, rank=rank, alpha=alpha
-            )
+            inject_lora_into_linear(block.attn.out_proj, rank=rank, alpha=alpha)
             replaced += 1
         return replaced
 

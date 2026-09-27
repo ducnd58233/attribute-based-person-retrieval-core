@@ -6,43 +6,52 @@ import math
 
 import torch
 from torch import nn
+from torch.nn.utils.parametrize import register_parametrization
 
 
-class LoRALinear(nn.Module):
-    """``y = W x + b + (alpha/r) B A x`` with frozen base weights."""
+class _LoRAWeight(nn.Module):
+    """Parametrization: ``W' = W + (alpha/r) B A`` so F.linear sees LoRA."""
 
     def __init__(
         self,
-        base: nn.Linear,
+        in_features: int,
+        out_features: int,
         *,
         rank: int,
-        alpha: float = 16.0,
+        alpha: float,
     ) -> None:
         super().__init__()
-        if rank < 1:
-            raise ValueError(f"LoRA rank must be >= 1, got {rank}")
-        self.base = base
         self.rank = rank
-        self.alpha = float(alpha)
-        self.scaling = self.alpha / float(rank)
-        for parameter in self.base.parameters():
-            parameter.requires_grad = False
-        in_features = base.in_features
-        out_features = base.out_features
+        self.scaling = float(alpha) / float(rank)
         self.lora_A = nn.Parameter(torch.empty(rank, in_features))
         self.lora_B = nn.Parameter(torch.zeros(out_features, rank))
         nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
 
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """Apply base Linear then LoRA residual."""
-        base_out = self.base(inputs)
-        # (..., in) @ (in, r) -> (..., r) @ (r, out) via A^T then B^T
-        lora_out = (inputs @ self.lora_A.transpose(0, 1)) @ self.lora_B.transpose(0, 1)
-        return base_out + lora_out * self.scaling
+    def forward(self, weight: torch.Tensor) -> torch.Tensor:
+        """Return base weight plus low-rank residual."""
+        return weight + (self.lora_B @ self.lora_A) * self.scaling
 
 
-def inject_lora_into_linear(
-    module: nn.Linear, *, rank: int, alpha: float
-) -> LoRALinear:
-    """Wrap a Linear as LoRALinear (callers must reassign the attribute)."""
-    return LoRALinear(module, rank=rank, alpha=alpha)
+def inject_lora_into_linear(module: nn.Linear, *, rank: int, alpha: float) -> nn.Linear:
+    """Attach LoRA to ``module.weight`` via parametrization; freeze base W/b.
+
+    PyTorch ``MultiheadAttention`` reads ``out_proj.weight`` with ``F.linear``,
+    so a wrapper Module that only overrides ``forward`` is skipped. Parametrizing
+    the weight keeps that path while training only A/B.
+    """
+    if rank < 1:
+        raise ValueError(f"LoRA rank must be >= 1, got {rank}")
+    module.weight.requires_grad = False
+    if module.bias is not None:
+        module.bias.requires_grad = False
+    register_parametrization(
+        module,
+        "weight",
+        _LoRAWeight(
+            module.in_features,
+            module.out_features,
+            rank=rank,
+            alpha=alpha,
+        ),
+    )
+    return module

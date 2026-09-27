@@ -15,80 +15,72 @@ from torchvision import transforms
 from src.wacv.attributes import attribute_names_from_columns
 
 KNOWN_DOMAINS: tuple[str, ...] = ("PA100k", "PETA", "Market1501")
+DEFAULT_IMAGE_SIZE: tuple[int, int] = (256, 128)
 
-IMAGE_TRANSFORM = transforms.Compose(
-    [
-        transforms.Resize((256, 128)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ]
-)
-
-TRAIN_TRANSFORM = transforms.Compose(
-    [
-        transforms.Resize((256, 128)),
-        transforms.AugMix(),
-        transforms.RandomHorizontalFlip(),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        transforms.RandomErasing(p=0.25),
-    ]
-)
-
-# open_clip ViT-B/16 openai mean/std; aspect-preserving 256x128 ReID crop.
+# open_clip openai mean/std; aspect-preserving ReID crop (default 256x128).
 _CLIP_MEAN = [0.48145466, 0.4578275, 0.40821073]
 _CLIP_STD = [0.26862954, 0.26130258, 0.27577711]
+_IMAGENET_MEAN = [0.485, 0.456, 0.406]
+_IMAGENET_STD = [0.229, 0.224, 0.225]
 
-CLIP_IMAGE_TRANSFORM = transforms.Compose(
-    [
-        transforms.Resize((256, 128)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=_CLIP_MEAN, std=_CLIP_STD),
-    ]
+
+def _eval_transform(
+    size: tuple[int, int], *, mean: list[float], std: list[float]
+) -> transforms.Compose:
+    return transforms.Compose(
+        [
+            transforms.Resize(size),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=mean, std=std),
+        ]
+    )
+
+
+def _train_transform(
+    size: tuple[int, int], *, mean: list[float], std: list[float]
+) -> transforms.Compose:
+    return transforms.Compose(
+        [
+            transforms.Resize(size),
+            transforms.AugMix(),
+            transforms.RandomHorizontalFlip(),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=mean, std=std),
+            transforms.RandomErasing(p=0.25),
+        ]
+    )
+
+
+IMAGE_TRANSFORM = _eval_transform(
+    DEFAULT_IMAGE_SIZE, mean=_IMAGENET_MEAN, std=_IMAGENET_STD
+)
+TRAIN_TRANSFORM = _train_transform(
+    DEFAULT_IMAGE_SIZE, mean=_IMAGENET_MEAN, std=_IMAGENET_STD
+)
+CLIP_IMAGE_TRANSFORM = _eval_transform(
+    DEFAULT_IMAGE_SIZE, mean=_CLIP_MEAN, std=_CLIP_STD
+)
+CLIP_TRAIN_TRANSFORM = _train_transform(
+    DEFAULT_IMAGE_SIZE, mean=_CLIP_MEAN, std=_CLIP_STD
 )
 
-CLIP_TRAIN_TRANSFORM = transforms.Compose(
-    [
-        transforms.Resize((256, 128)),
-        transforms.AugMix(),
-        transforms.RandomHorizontalFlip(),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=_CLIP_MEAN, std=_CLIP_STD),
-        transforms.RandomErasing(p=0.25),
-    ]
-)
 
-
-CLIP_L14_IMAGE_TRANSFORM = transforms.Compose(
-    [
-        transforms.Resize((224, 112)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=_CLIP_MEAN, std=_CLIP_STD),
-    ]
-)
-
-CLIP_L14_TRAIN_TRANSFORM = transforms.Compose(
-    [
-        transforms.Resize((224, 112)),
-        transforms.AugMix(),
-        transforms.RandomHorizontalFlip(),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=_CLIP_MEAN, std=_CLIP_STD),
-        transforms.RandomErasing(p=0.25),
-    ]
-)
-
-
-def transforms_for_model(model_name: str, *, train: bool) -> transforms.Compose:
-    """Pick ImageNet ReID crops or CLIP preprocessing (B/16 256x128, L/14 224x112)."""
-    if model_name == "clip_vit_l14":
-        return CLIP_L14_TRAIN_TRANSFORM if train else CLIP_L14_IMAGE_TRANSFORM
+def transforms_for_model(
+    model_name: str,
+    *,
+    train: bool,
+    image_size: tuple[int, int] = DEFAULT_IMAGE_SIZE,
+) -> transforms.Compose:
+    """Pick ImageNet or CLIP preprocessing at ``image_size`` (H, W)."""
+    size = (int(image_size[0]), int(image_size[1]))
     if model_name.startswith("clip_"):
-        return CLIP_TRAIN_TRANSFORM if train else CLIP_IMAGE_TRANSFORM
-    return TRAIN_TRANSFORM if train else IMAGE_TRANSFORM
+        if train:
+            return _train_transform(size, mean=_CLIP_MEAN, std=_CLIP_STD)
+        return _eval_transform(size, mean=_CLIP_MEAN, std=_CLIP_STD)
+    if train:
+        return _train_transform(size, mean=_IMAGENET_MEAN, std=_IMAGENET_STD)
+    return _eval_transform(size, mean=_IMAGENET_MEAN, std=_IMAGENET_STD)
 
 
 def load_gt(csv_path: Path) -> pd.DataFrame:

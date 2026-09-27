@@ -12,6 +12,7 @@ data:
   num_workers: 4
   limit: null
   train_augmentation: true
+  image_size: [224, 112]
   train_domains:
     - PA100k
     - PETA
