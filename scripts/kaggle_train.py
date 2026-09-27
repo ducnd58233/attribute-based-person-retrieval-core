@@ -91,13 +91,23 @@ def write_kernel_metadata(staging_dir: Path, *, kernel_id: str, title: str) -> N
     )
 
 
-def kernel_status(kernel_id: str) -> str:
-    result = subprocess.run(
-        ["kaggle", "kernels", "status", kernel_id],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+def kernel_status(kernel_id: str) -> str | None:
+    """The kernel's status text, or None on a transient CLI/network hiccup.
+
+    A poll loop that must run for hours cannot let one bad call (a dropped
+    connection, a rate limit) take down local tracking of a kernel that is
+    still running fine on Kaggle - it retries instead.
+    """
+    try:
+        result = subprocess.run(
+            ["kaggle", "kernels", "status", kernel_id],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (subprocess.CalledProcessError, OSError) as exc:
+        print(f"transient status check failure, retrying: {exc}")
+        return None
     return result.stdout.strip()
 
 
@@ -105,13 +115,16 @@ def wait_for_terminal_status(
     kernel_id: str, *, poll_interval: float, timeout_hours: float | None
 ) -> str:
     started = time.monotonic()
+    last_status = "unknown (no successful status check yet)"
     while True:
         status_text = kernel_status(kernel_id)
-        lowered = status_text.lower()
-        elapsed_min = (time.monotonic() - started) / 60
-        print(f"[{elapsed_min:6.1f}m] {status_text}")
-        if any(word in lowered for word in _TERMINAL_OK + _TERMINAL_FAIL):
-            return status_text
+        if status_text is not None:
+            last_status = status_text
+            elapsed_min = (time.monotonic() - started) / 60
+            print(f"[{elapsed_min:6.1f}m] {status_text}")
+            terminal_words = _TERMINAL_OK + _TERMINAL_FAIL
+            if any(word in status_text.lower() for word in terminal_words):
+                return status_text
         timed_out = (
             timeout_hours is not None
             and (time.monotonic() - started) > timeout_hours * 3600
@@ -121,7 +134,7 @@ def wait_for_terminal_status(
                 f"local poll timed out after {timeout_hours}h; the kernel keeps "
                 f"running on Kaggle. Check later: kaggle kernels status {kernel_id}"
             )
-            return status_text
+            return last_status
         time.sleep(poll_interval)
 
 

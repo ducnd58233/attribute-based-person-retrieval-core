@@ -79,7 +79,10 @@ def main() -> None:
             check=True,
         )
         local_runs = ROOT / "runs" / result.run_name
-        local_runs.mkdir(parents=True, exist_ok=True)
+        # Parent only: `colab download` copies REMOTE's contents *into* LOCAL
+        # when LOCAL already exists, which would nest runs/<name>/<name>/...
+        # Leaving the final path itself absent makes it become that exact copy.
+        (ROOT / "runs").mkdir(parents=True, exist_ok=True)
         subprocess.run(
             [
                 "colab",
