@@ -160,6 +160,47 @@ uv run python scripts/export-colab-notebook.py \
   --out notebooks/custom.ipynb
 ```
 
+### `scripts/remote-training.py`
+
+Push the `Download → Train → Eval → Visualize → Package` pipeline to a
+hosted GPU (Kaggle kernel or Colab session), wait for it, and pull the
+result into local `runs/<run.name>/` — for training on a machine other than
+this one. Backends live under `src/wacv/remote/`; `kaggle` is the primary,
+cross-platform (including Windows) one since a pushed kernel keeps running
+on Kaggle's servers even if this machine goes to sleep, `colab` is
+secondary and Linux/macOS-only (`google-colab-cli`, `uv tool install
+google-colab-cli`; run it from WSL2 on Windows). See `AGENTS.md` "Remote GPU
+training" for the full walkthrough and the credential/security rules.
+
+```sh
+cp .env.example .env   # fill in KAGGLE_USERNAME / KAGGLE_KEY, never commit
+uv run python scripts/remote-training.py kaggle --config configs/convnext_baseline.yml
+uv run python scripts/remote-training.py colab  --config configs/convnext_baseline.yml --gpu T4
+```
+
+| Argument (both backends) | Required | Default | Description |
+|---|---|---|---|
+| `--config` | **yes** | — | Experiment YAML to run remotely. |
+| `--stage-only` | no | off | Build the staging folder and exit; no backend CLI or credentials needed. |
+
+| `kaggle`-only argument | Required | Default | Description |
+|---|---|---|---|
+| `--accelerator` | no | `NvidiaTeslaT4` | Kaggle GPU/TPU accelerator id. |
+| `--kaggle-username` | no | from `.env` or the home-directory *~/.kaggle/kaggle.json* | Overrides the resolved Kaggle username. |
+| `--poll-interval` | no | `60` | Seconds between `kaggle kernels status` checks. |
+| `--timeout-hours` | no | unlimited | Give up *polling* after this long; the kernel itself keeps running on Kaggle regardless. |
+
+| `colab`-only argument | Required | Default | Description |
+|---|---|---|---|
+| `--gpu` | no | `T4` | Colab GPU type. |
+| `--session` | no | `wacv-train` | `google-colab-cli` session name. |
+
+```sh
+# check it can still run, no credentials needed
+uv run python scripts/remote-training.py kaggle --config configs/smoke.yml --stage-only
+uv run python scripts/remote-training.py colab  --config configs/smoke.yml --stage-only
+```
+
 ## Testing a submission before upload
 
 ```sh
