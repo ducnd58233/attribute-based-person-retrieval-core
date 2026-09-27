@@ -120,7 +120,7 @@ def _evaluate_protocol(
         predict_probabilities,
         ranking_distance,
     )
-    from src.wacv.metrics import evaluate_ranking
+    from src.wacv.monitoring.metrics import evaluate_ranking
 
     workers = resolve_num_workers(config.data.num_workers)
     loader = DataLoader(

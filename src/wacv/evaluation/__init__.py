@@ -16,6 +16,8 @@ from src.wacv.attributes import (
     exclusive_attribute_groups,
     independent_attribute_indices,
 )
+from src.wacv.config import InferenceConfig, RankingConfig
+from src.wacv.monitoring.metrics import evaluate_ranking
 from src.wacv.query_adapter import AttributeModelWithHardQuery
 
 DistanceName = Literal[
@@ -584,3 +586,60 @@ def mean_accuracy(probabilities: np.ndarray, targets: np.ndarray) -> float:
         negatives.sum(axis=0), 1
     )
     return float((0.5 * (true_positive_rate + true_negative_rate)).mean())
+
+
+def compute_ranking_metrics(
+    model: nn.Module,
+    loader: Iterable[tuple[torch.Tensor, torch.Tensor]],
+    queries: np.ndarray,
+    gallery_attrs: np.ndarray,
+    device: torch.device,
+    ranking_config: RankingConfig,
+    *,
+    progress: bool,
+    inference_config: InferenceConfig | None = None,
+) -> dict[str, float]:
+    """Predict, rank, and score one gallery split.
+
+    Shared by ``Trainer._ranking_metrics`` (per-epoch, EMA-wrapped model)
+    and ``scripts/evaluate.py`` (standalone, unwrapped model) - both used
+    to reimplement this sequence independently.
+    """
+    inference = inference_config or InferenceConfig()
+    probabilities = predict_probabilities(
+        model,
+        loader,
+        device,
+        progress=progress,
+        tta=inference.tta,
+        tta_scale=float(inference.tta_scale),
+    )
+    gallery_embeddings: np.ndarray | None = None
+    query_embeddings: np.ndarray | None = None
+    if ranking_config.distance == "clear_hard":
+        gallery_embeddings = predict_gallery_embeddings(
+            model, loader, device, progress=progress
+        )
+        root = _unwrap_eval_module(model)
+        if not isinstance(root, AttributeModelWithHardQuery):
+            raise TypeError("clear_hard requires AttributeModelWithHardQuery")
+        query_tensor = torch.as_tensor(queries, dtype=torch.float32, device=device)
+        with torch.inference_mode():
+            query_embeddings = root.query_embeddings(query_tensor).cpu().numpy()
+    distances = ranking_distance(
+        queries,
+        probabilities,
+        distance=ranking_config.distance,
+        temperature=ranking_config.temperature,
+        alpha=ranking_config.alpha,
+        gallery_embeddings=gallery_embeddings,
+        query_embeddings=query_embeddings,
+        clear_fusion=ranking_config.clear_fusion,
+    )
+    if ranking_config.query_norm == "dual_softmax":
+        distances = dual_softmax_rerank(
+            distances, tau=float(ranking_config.query_norm_tau)
+        )
+    metrics = evaluate_ranking(queries, gallery_attrs, distances)
+    metrics["mA"] = mean_accuracy(probabilities, gallery_attrs)
+    return metrics

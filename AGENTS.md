@@ -82,10 +82,57 @@ here.
   `pyproject.toml` ignore / per-file-ignore lists to land a change. Fix the
   code (or the typed API) so the existing rules pass. Prefer deferred
   `src.wacv` imports inside functions in `scripts/` over path-hack `# noqa`.
+- **A function signature over `max-args` takes an existing config object,
+  not a suppress (MUST):** when extracting a shared helper pushes a
+  signature past `pyproject.toml`'s `[tool.ruff.lint.pylint] max-args`
+  limit, look for a config object the callers already have in hand
+  (`ExperimentConfig`, `RankingConfig`, ...) before adding parameters one
+  at a time. This actually happened extracting `compute_ranking_metrics`
+  into `src/wacv/evaluation/__init__.py`: three scalar parameters
+  (`distance`, `temperature`, `clear_fusion`) pushed it to 9 args and
+  failed `PLR0913`; both call sites already had the `RankingConfig` those
+  three fields live on, so the fix was accepting that object instead of
+  suppressing the rule or leaving the extraction unwritten.
+- **`scripts/` file naming: `-`, never `_` (MUST):** every file directly
+  under `scripts/` uses hyphens (`export-colab-notebook.py`,
+  `sweep-ranking-distance.py`), matching the CLI-entrypoint convention
+  already established there. This does not apply to `src/wacv/**` -
+  Python package/module names there must stay valid identifiers
+  (underscores), and cannot use hyphens at all.
+- **`src/wacv/` folder layout by concern (MUST):** a concern gets its own
+  subpackage once it is more than "one obvious file" - `src/wacv/models/`
+  (network architectures), `src/wacv/evaluation/` (prediction, ranking
+  distances, metric computation), `src/wacv/monitoring/` (`metrics.py`
+  scoring functions, `tracking.py` `RunTracker` persistence/logging),
+  `src/wacv/remote/` (hosted-GPU training backends). A single-file module
+  that does not yet belong to one of these concerns (`data.py`,
+  `config.py`, `checkpoint.py`, `losses.py`, `attributes.py`,
+  `query_adapter.py`, `visualize.py`, `engine.py`) stays
+  flat rather than being forced into a one-file package - do not create a
+  subpackage without a second file that actually belongs in it.
 - **No unrequested code (MUST):** only add files and logic the current task
   acceptance criteria require. Prefer a script under `scripts/` over new
   packages, fixtures, or README sections. Delete scaffolding that is not
   needed for train / evaluate / package / submit.
+- **Grep the whole repo before deleting a function or class as dead
+  (MUST):** "looks unused in this file" is not evidence. Search every
+  `src/`, `scripts/`, `tests/`, and `submission/` file for the exact name
+  before removing it, and note in the PR description (or commit body)
+  that the search came back empty. `data.py::load_query_ids` and
+  `query_adapter.py::unwrap_backbone` were removed this way - a
+  same-file-only look would have missed that `scripts/export-colab-
+  notebook.py`'s AST-walk-based inlining is also a real caller for some
+  functions, which a narrower search would not have ruled out.
+- **The same predict/rank/score (or similar) sequence in two files gets
+  extracted immediately, not on a later cleanup pass (MUST):** if writing
+  a second copy of logic that already exists elsewhere in the codebase,
+  stop and extract a shared function in the same change, into whichever
+  module already owns that concern (see the folder-layout-by-concern rule
+  above). `Trainer._ranking_metrics` (`engine.py`) and `scripts/
+  evaluate.py`'s `_evaluate_checkpoint` independently reimplemented the
+  same predict → rank → score sequence across several earlier PRs before
+  one refactor finally noticed and extracted `compute_ranking_metrics` -
+  the second copy should never have been written standalone.
 - **No decorative runtime strings (MUST):** do not add print/log messages
   whose only job is to narrate that a check "passed cleanly" or similar
   fluff (e.g. `run.py imports cleanly with no network access`). Docker /
@@ -125,6 +172,109 @@ here.
   `Path(__file__)` to a *stage script*'s top level. When in doubt, check
   which mechanism applies (inlined script body vs. `%%writefile`+`import`)
   before changing either direction.
+- **Moving a file changes its `Path(__file__).resolve().parents[N]` index
+  (MUST):** the index counts directories between the file and the repo
+  root, so moving a file one level deeper (e.g. into a new subpackage)
+  means every `parents[N]` call in it needs `N + 1`, not the same number.
+  Nothing in ruff/pyright/black catches a now-wrong-but-still-valid index;
+  check every file at the *new* depth for what index they already use
+  (`src/wacv/remote/stage.py` uses `parents[3]`) before assuming the old
+  number still applies. Moving `tracking.py` into `src/wacv/monitoring/`
+  left `parents[2]` silently resolving to the wrong root until this was
+  caught by that cross-check, not by any tool.
+- **Remote GPU training: one entrypoint, one backend per hosted provider
+  (MUST):** headless `Download → Train → Eval → Visualize → Package` runs
+  on hosted GPUs go through `scripts/remote-training.py <backend> --config
+  ...`, never a hand-written one-off. `<backend>` is `kaggle` (primary —
+  cross-platform including native Windows; a pushed kernel runs
+  server-side, so it survives a closed laptop) or `colab` (secondary —
+  `google-colab-cli`, **Linux/macOS only**, run from WSL2 on Windows;
+  `colab exec` blocks the local process for the whole run, so use
+  `tmux`/`nohup` for one that must outlive a closed terminal, or prefer
+  Kaggle). Add a third hosted provider by dropping a module under
+  `src/wacv/remote/` that exposes a `register(subparsers)` function (same
+  shape as `kaggle.py`/`colab.py`) and listing it in
+  `scripts/remote-training.py`'s `BACKENDS`; do not add a second top-level
+  script.
+
+  Every backend builds on `src/wacv/remote/stage.py`, which reuses
+  `scripts/export-colab-notebook.py`'s own
+  `stages_for_config`/`visualize_stage`/`experiment_identity` so the
+  notebook path and every headless backend stay in sync. None of them need
+  this private repo to be `git clone`d from inside the remote sandbox —
+  each stages a self-contained folder (this repo's `scripts/` + `src/wacv/`
+  + one experiment YAML, never `data/`) and ships that instead.
+
+  ```sh
+  uv sync                                        # pulls kaggle+packaging from dev
+  cp .env.example .env                           # fill in KAGGLE_USERNAME/KAGGLE_KEY
+  # https://www.kaggle.com/settings -> Create New Token gives both
+  uv run python scripts/remote-training.py kaggle --config configs/<name>.yml
+
+  uv tool install google-colab-cli               # once per machine, not a project dep
+  uv run python scripts/remote-training.py colab --config configs/<name>.yml --gpu T4
+  ```
+
+  `remote-training.py` loads `.env` (gitignored; copy from `.env.example`,
+  never commit it) into the environment at startup, without overriding a
+  real env var already set — `KAGGLE_USERNAME`/`KAGGLE_KEY` reach the
+  `kaggle` CLI subprocess that way, and this repo's own code never reads
+  the key value, only ever `username` when falling back to the
+  home-directory file *~/.kaggle/kaggle.json*.
+
+  **Colab with no human present (verified):** `colab`'s default
+  `--auth adc` uses Google's Application Default Credentials. A human
+  runs, once, on any machine with a browser (does not have to be the
+  agent's machine): `gcloud auth application-default login
+  --no-launch-browser` — this prints a URL plus a device code, completes
+  consent wherever the browser is, and writes a JSON credentials file to
+  a well-known path (*~/.config/gcloud/application_default_credentials.json*
+  on Linux/macOS). Every later `colab` invocation reuses that file
+  automatically, with zero further interaction — this is ADC's documented
+  contract, not something this repo adds. Point `GOOGLE_APPLICATION_
+  CREDENTIALS` in `.env` at a copy of that file and no code change is
+  needed: `env.py::load_dotenv` forwards it into `os.environ` like any
+  other `.env` line, and `subprocess.run` already inherits the parent
+  environment. **`UNVERIFIED`:** whether Colab's own runtime-provisioning
+  quota accepts a service-account identity — only tested against a
+  personal Google account's own ADC file; use the human's own account's
+  credentials, not a separate service account, until that is confirmed.
+
+  `--stage-only` on either backend builds the staging folder and exits
+  without needing that backend's CLI, credentials, or network access at all. The Kaggle backend pushes a `script`-type
+  kernel (`enable_gpu`, `enable_internet` both on) and polls `kaggle
+  kernels status` until terminal (no local timeout unless `--timeout-hours`
+  is passed), then `kaggle kernels output`s into local `runs/<run_name>/`.
+  The Colab backend runs `colab new → upload → exec → download → stop`
+  (`stop` always runs, even on failure, so a failed run doesn't leave a
+  billed GPU session up).
+
+  **Staged experiment configs must stay secret-free** (no API keys, W&B
+  tokens, or similar in a `configs/*.yml`) — the staging folder ships that
+  YAML verbatim to a third-party sandbox (Kaggle/Colab), and nothing here
+  scans it for embedded secrets.
+- **Notebook and remote-path check, after touching training code (MUST):**
+  any change to `scripts/*.py` or `src/wacv/**` regenerates and
+  re-validates every path that ships that code before the change counts as
+  done:
+
+  ```sh
+  uv run python scripts/export-colab-notebook.py --config configs/<touched-experiment>.yml
+  uv run python scripts/remote-training.py kaggle --config configs/<touched-experiment>.yml --stage-only
+  uv run python scripts/remote-training.py colab  --config configs/<touched-experiment>.yml --stage-only
+  ```
+
+  All three fail loudly (non-zero exit) on a syntax error or an unresolved
+  `src.wacv` import anywhere in the reachable pipeline, and `--stage-only`
+  also compiles the generated `run_remote.py` entrypoint itself before
+  writing it — needs no Kaggle/Colab credentials, so there is no excuse to
+  skip it. When the change touches shared code (`src/wacv/engine.py`,
+  `data.py`, and similar) rather than one experiment, run the three
+  commands against `configs/smoke.yml` instead of picking one experiment
+  arbitrarily. This is a syntax/import check, not a substitute for the
+  deeper, already-documented bounded smoke run (`uv run python
+  scripts/train.py --config configs/smoke.yml`) when the change might
+  affect runtime behavior, not just imports.
 
 </always_on>
 
@@ -158,5 +308,9 @@ here.
   rules.
 - Add code to `run.py`/the submission entry point that reaches the network
   at inference time.
+- Commit Kaggle/Colab credentials (`.env`, `kaggle.json`, `access_token`,
+  OAuth config) anywhere in this repo, or `git clone` this repo from inside
+  a Kaggle kernel or Colab VM (stage a self-contained folder instead —
+  `src/wacv/remote/stage.py`).
 
 </delivery_gates>

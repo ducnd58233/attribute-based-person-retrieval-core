@@ -153,10 +153,3 @@ def attach_hard_query_adapter(
         num_attributes=num_attributes,
         adapter_dim=adapter_dim,
     )
-
-
-def unwrap_backbone(model: nn.Module) -> nn.Module:
-    """Return the underlying classifier when a hard-query wrapper is present."""
-    if isinstance(model, AttributeModelWithHardQuery):
-        return model.backbone
-    return model

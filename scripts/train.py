@@ -175,7 +175,7 @@ def main() -> None:
     from src.wacv.losses import build_attribute_criterion
     from src.wacv.models import build_model
     from src.wacv.models.clip import ClipAttributeClassifier
-    from src.wacv.tracking import RunTracker
+    from src.wacv.monitoring.tracking import RunTracker
 
     config = load_config(parse_args().config)
     seed_everything(config.run.seed)
