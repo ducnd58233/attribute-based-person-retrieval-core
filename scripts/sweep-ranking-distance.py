@@ -75,7 +75,7 @@ def _score_variants(
         mean_accuracy,
         specker_distance,
     )
-    from src.wacv.metrics import evaluate_ranking
+    from src.wacv.monitoring.metrics import evaluate_ranking
 
     results: dict[str, dict[str, float]] = {}
 

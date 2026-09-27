@@ -82,6 +82,23 @@ here.
   `pyproject.toml` ignore / per-file-ignore lists to land a change. Fix the
   code (or the typed API) so the existing rules pass. Prefer deferred
   `src.wacv` imports inside functions in `scripts/` over path-hack `# noqa`.
+- **`scripts/` file naming: `-`, never `_` (MUST):** every file directly
+  under `scripts/` uses hyphens (`export-colab-notebook.py`,
+  `sweep-ranking-distance.py`), matching the CLI-entrypoint convention
+  already established there. This does not apply to `src/wacv/**` -
+  Python package/module names there must stay valid identifiers
+  (underscores), and cannot use hyphens at all.
+- **`src/wacv/` folder layout by concern (MUST):** a concern gets its own
+  subpackage once it is more than "one obvious file" - `src/wacv/models/`
+  (network architectures), `src/wacv/evaluation/` (prediction, ranking
+  distances, metric computation), `src/wacv/monitoring/` (`metrics.py`
+  scoring functions, `tracking.py` `RunTracker` persistence/logging),
+  `src/wacv/remote/` (hosted-GPU training backends). A single-file module
+  that does not yet belong to one of these concerns (`data.py`,
+  `config.py`, `checkpoint.py`, `losses.py`, `attributes.py`,
+  `query_adapter.py`, `visualize.py`, `engine.py`) stays
+  flat rather than being forced into a one-file package - do not create a
+  subpackage without a second file that actually belongs in it.
 - **No unrequested code (MUST):** only add files and logic the current task
   acceptance criteria require. Prefer a script under `scripts/` over new
   packages, fixtures, or README sections. Delete scaffolding that is not
