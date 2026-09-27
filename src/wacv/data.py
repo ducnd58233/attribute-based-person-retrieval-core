@@ -61,8 +61,31 @@ CLIP_TRAIN_TRANSFORM = transforms.Compose(
 )
 
 
+CLIP_L14_IMAGE_TRANSFORM = transforms.Compose(
+    [
+        transforms.Resize((224, 112)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=_CLIP_MEAN, std=_CLIP_STD),
+    ]
+)
+
+CLIP_L14_TRAIN_TRANSFORM = transforms.Compose(
+    [
+        transforms.Resize((224, 112)),
+        transforms.AugMix(),
+        transforms.RandomHorizontalFlip(),
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=_CLIP_MEAN, std=_CLIP_STD),
+        transforms.RandomErasing(p=0.25),
+    ]
+)
+
+
 def transforms_for_model(model_name: str, *, train: bool) -> transforms.Compose:
-    """Pick ImageNet ReID crops or CLIP 256x128 preprocessing."""
+    """Pick ImageNet ReID crops or CLIP preprocessing (B/16 256x128, L/14 224x112)."""
+    if model_name == "clip_vit_l14":
+        return CLIP_L14_TRAIN_TRANSFORM if train else CLIP_L14_IMAGE_TRANSFORM
     if model_name.startswith("clip_"):
         return CLIP_TRAIN_TRANSFORM if train else CLIP_IMAGE_TRANSFORM
     return TRAIN_TRANSFORM if train else IMAGE_TRANSFORM
