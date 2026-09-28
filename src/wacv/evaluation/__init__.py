@@ -143,14 +143,20 @@ def predict_gallery_embeddings(
 
 
 def l1_distance(queries: np.ndarray, probabilities: np.ndarray) -> np.ndarray:
-    """Compute `(queries, gallery)` L1 distances without a 3-D tensor."""
+    """Compute `(queries, gallery)` L1 distances without a 3-D tensor.
+
+    In place from the matmul on: `a + b - 2*c` as written builds the matmul
+    result plus two more full Q x G arrays for the two additions. Used from
+    `hybrid_distance`, which is itself holding a same-size accumulator - see
+    its docstring for why this matters on Codabench-sized galleries.
+    """
     query_values = queries.astype(np.float32)
     predicted_values = probabilities.astype(np.float32)
-    return (
-        query_values.sum(axis=1, keepdims=True)
-        + predicted_values.sum(axis=1)[None, :]
-        - 2 * query_values @ predicted_values.T
-    )
+    out = query_values @ predicted_values.T
+    out *= -2.0
+    out += query_values.sum(axis=1, keepdims=True)
+    out += predicted_values.sum(axis=1)[None, :]
+    return out
 
 
 def _calibrate_probabilities(
@@ -327,7 +333,11 @@ def nll_distance(
     logits = log_p - log_1mp
     query_values = queries.astype(np.float32)
     # -q·logit(p) - 1·log(1-p)  ==  -Σ[q log p + (1-q) log(1-p)]
-    return -(query_values @ logits.T) - log_1mp.sum(axis=1)[None, :]
+    # In place from the matmul on, same reason as l1_distance above.
+    out = query_values @ logits.T
+    out *= -1.0
+    out -= log_1mp.sum(axis=1)[None, :]
+    return out
 
 
 def _bernoulli_nll_bits(
@@ -406,13 +416,22 @@ def group_categorical_nll_distance(
 
 
 def _minmax_per_query(distances: np.ndarray) -> np.ndarray:
-    """Scale each query row to [0, 1]; constant rows become zeros."""
+    """Scale each query row to [0, 1]; constant rows become zeros.
+
+    Mutates and returns ``distances`` itself. Mirrors submission/run.py's
+    copy of this function exactly (see its docstring for why); both call
+    sites below pass a scratch array built solely to be normalised here.
+    """
     row_min = distances.min(axis=1, keepdims=True)
     row_max = distances.max(axis=1, keepdims=True)
     spread = row_max - row_min
     safe = np.maximum(spread, 1e-8)
-    normalised = (distances - row_min) / safe
-    return np.where(spread > 0, normalised, np.zeros_like(distances))
+    distances -= row_min
+    distances /= safe
+    zero_rows = (spread <= 0).ravel()
+    if zero_rows.any():
+        distances[zero_rows] = 0.0
+    return distances
 
 
 def hybrid_distance(
@@ -422,13 +441,21 @@ def hybrid_distance(
     alpha: float = 0.5,
     temperature: float = 1.0,
 ) -> np.ndarray:
-    """Per-query mix of min-max-normalised NLL and L1 distances."""
-    nll = _minmax_per_query(
+    """Per-query mix of min-max-normalised NLL and L1 distances.
+
+    Mirrors submission/run.py's copy of this function exactly: accumulate
+    into `out` in place so at most one of {nll, l1} holds its own Q x G
+    buffer at a time, instead of both plus two more for the combine step.
+    """
+    weight = float(alpha)
+    out = _minmax_per_query(
         nll_distance(queries, probabilities, temperature=temperature)
     )
+    out *= weight
     l1 = _minmax_per_query(l1_distance(queries, probabilities))
-    weight = float(alpha)
-    return weight * nll + (1.0 - weight) * l1
+    l1 *= 1.0 - weight
+    out += l1
+    return out
 
 
 def ranking_distance(
@@ -556,10 +583,16 @@ def dual_softmax_rerank(
 
     Gallery columns are processed in chunks so peak RAM stays bounded on
     Codabench-sized Q×G matrices (float64 full-matrix form peaked ~6GB).
+
+    Mutates and returns its own float32-cast copy of ``distances`` in place
+    rather than allocating a second full Q x G output array - mirrors
+    submission/run.py's copy of this function exactly (see its docstring).
+    Both call sites here reassign their ``distances`` variable to this
+    function's return value and never read the pre-call array again.
     """
-    similarities = -np.asarray(distances, dtype=np.float32)
+    similarities = np.asarray(distances, dtype=np.float32)
+    np.negative(similarities, out=similarities)
     scale = max(float(tau), 1e-8)
-    out = np.empty_like(similarities)
     n_gallery = similarities.shape[1]
     step = max(int(chunk_cols), 1)
     for start in range(0, n_gallery, step):
@@ -571,8 +604,8 @@ def dual_softmax_rerank(
             np.maximum(exp_shifted.sum(axis=0, keepdims=True), 1e-12)
         )
         log_softmax = block - col_max - log_partition
-        out[:, start:end] = -(similarities[:, start:end] + log_softmax)
-    return out
+        similarities[:, start:end] = -(similarities[:, start:end] + log_softmax)
+    return similarities
 
 
 def mean_accuracy(probabilities: np.ndarray, targets: np.ndarray) -> float:

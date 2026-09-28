@@ -296,7 +296,13 @@ def _predict_gallery_embeddings(gallery: list[dict[str, Any]]) -> np.ndarray:
 
 
 def _l1_distance(queries: np.ndarray, probabilities: np.ndarray) -> np.ndarray:
-    return probabilities.sum(1)[None, :] + queries @ (1.0 - 2.0 * probabilities).T
+    # In place from the matmul on: the naive `a + queries @ b.T` form holds
+    # both the matmul result and the sum's output as separate full Q x G
+    # arrays at once (called from _hybrid_distance, which is itself holding
+    # a same-size accumulator - see its docstring).
+    out = queries @ (1.0 - 2.0 * probabilities).T
+    out += probabilities.sum(1)[None, :]
+    return out
 
 
 def _specker_distance(
@@ -338,7 +344,11 @@ def _nll_distance(
     log_p = np.log(clipped)
     log_1mp = np.log(1.0 - clipped)
     logits = log_p - log_1mp
-    return -(queries @ logits.T) - log_1mp.sum(axis=1)[None, :]
+    # In place from the matmul on, same reason as _l1_distance above.
+    out = queries @ logits.T
+    out *= -1.0
+    out -= log_1mp.sum(axis=1)[None, :]
+    return out
 
 
 _EXCLUSIVE_GROUPS: tuple[tuple[tuple[int, ...], bool], ...] = (
@@ -405,12 +415,29 @@ def _group_categorical_nll_distance(
 
 
 def _minmax_per_query(distances: np.ndarray) -> np.ndarray:
+    """Scale each query row to [0, 1]; constant rows become zeros.
+
+    Mutates and returns ``distances`` itself rather than allocating a fresh
+    Q x G array. The original
+    `np.where(spread > 0, normalised, np.zeros_like(distances))` held four
+    full Q x G float32 arrays at once (the input, ``normalised``, the
+    ``zeros_like`` array, and the ``where`` output) - on the real E17
+    gallery shape (~3462x33407) that is four ~463MB allocations alive
+    simultaneously. Both call sites in `_hybrid_distance` pass a scratch
+    array built solely to be normalised here (`_nll_distance`'s and
+    `_l1_distance`'s return values), so mutating it is safe; a caller that
+    needs its array preserved should pass ``distances.copy()``.
+    """
     row_min = distances.min(axis=1, keepdims=True)
     row_max = distances.max(axis=1, keepdims=True)
     spread = row_max - row_min
     safe = np.maximum(spread, 1e-8)
-    normalised = (distances - row_min) / safe
-    return np.where(spread > 0, normalised, np.zeros_like(distances))
+    distances -= row_min
+    distances /= safe
+    zero_rows = (spread <= 0).ravel()
+    if zero_rows.any():
+        distances[zero_rows] = 0.0
+    return distances
 
 
 def _hybrid_distance(
@@ -419,10 +446,22 @@ def _hybrid_distance(
     temperature: float,
     alpha: float,
 ) -> np.ndarray:
-    nll = _minmax_per_query(_nll_distance(queries, probabilities, temperature))
-    l1 = _minmax_per_query(_l1_distance(queries, probabilities))
+    """Mix min-max-normalised NLL and L1, one term at a time.
+
+    Computing `nll` and `l1` as separate named arrays and combining them at
+    the end (`weight * nll + (1.0 - weight) * l1`) keeps both full Q x G
+    arrays alive for the combine step, plus two more for the
+    weight-scaled temporaries the `*`/`+` create. Accumulating into `out`
+    in place means at most one of {nll, l1} occupies its own Q x G buffer
+    at a time.
+    """
     weight = float(alpha)
-    return weight * nll + (1.0 - weight) * l1
+    out = _minmax_per_query(_nll_distance(queries, probabilities, temperature))
+    out *= weight
+    l1 = _minmax_per_query(_l1_distance(queries, probabilities))
+    l1 *= 1.0 - weight
+    out += l1
+    return out
 
 
 def _clear_hard_distance(
@@ -453,10 +492,20 @@ def _dual_softmax_rerank(
     Softmax is column-wise (over queries). Process gallery columns in chunks so
     a large QxG matrix does not allocate multi-GB float64 temporaries and get
     the Codabench worker OOM-killed ("Child task failed or non-zero return").
+
+    Mutates and returns its own float32-cast copy of ``distances`` in place
+    rather than allocating a second full Q x G output array: on the real E17
+    gallery shape (~3462x33407) that second array was itself a ~463MB
+    allocation the caller never needed once the chunked loop below can write
+    every result straight back over the value it read. Safe because
+    ``rank_gallery``'s only call site immediately reassigns its `distances`
+    variable to this function's return value and never reads the pre-call
+    array again - a caller that needs to keep its original array should pass
+    ``distances.copy()``.
     """
-    similarities = -np.asarray(distances, dtype=np.float32)
+    similarities = np.asarray(distances, dtype=np.float32)
+    np.negative(similarities, out=similarities)
     scale = max(float(tau), 1e-8)
-    out = np.empty_like(similarities)
     n_gallery = similarities.shape[1]
     step = max(int(chunk_cols), 1)
     for start in range(0, n_gallery, step):
@@ -468,8 +517,8 @@ def _dual_softmax_rerank(
             np.maximum(exp_shifted.sum(axis=0, keepdims=True), 1e-12)
         )
         log_softmax = block - col_max - log_partition
-        out[:, start:end] = -(similarities[:, start:end] + log_softmax)
-    return out
+        similarities[:, start:end] = -(similarities[:, start:end] + log_softmax)
+    return similarities
 
 
 def _score_gallery_distances(
