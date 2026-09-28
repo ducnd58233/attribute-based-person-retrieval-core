@@ -144,6 +144,10 @@ def build_staging_dir(config_path: Path, dest: Path) -> StagingResult:
         _copy_into(script, ROOT, dest)
     for src_file in src_files:
         _copy_into(src_file, ROOT, dest)
+    # Package markers are often unused by the AST walker but required for imports.
+    for init in (ROOT / "src").rglob("__init__.py"):
+        if init.is_file():
+            _copy_into(init, ROOT, dest)
     for submission_file in exporter.resolved_submission_files():
         _copy_into(submission_file, ROOT, dest)
     _copy_into(resolved_config, ROOT, dest)
