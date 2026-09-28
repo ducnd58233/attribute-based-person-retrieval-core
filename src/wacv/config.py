@@ -6,7 +6,14 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 import yaml
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PositiveFloat
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    PositiveFloat,
+    model_validator,
+)
 from pydantic.types import NonNegativeInt, PositiveInt
 
 ModelName = Literal[
@@ -93,6 +100,16 @@ class DataConfig(StrictConfig):
     train_domains: list[DomainName] | None = None
     eval_domains: list[DomainName] | None = None
     image_size: ImageSize = (256, 128)
+
+
+class AsmrAuxConfig(StrictConfig):
+    """ASMR ICCV 2021 semantic-margin auxiliary loss (train-only)."""
+
+    weight: float = Field(default=0.0, ge=0.0, le=5.0)
+
+
+class LossesConfig(StrictConfig):
+    asmr_aux: AsmrAuxConfig = Field(default_factory=AsmrAuxConfig)
 
 
 class OptimizationConfig(StrictConfig):
@@ -195,9 +212,18 @@ class ExperimentConfig(StrictConfig):
     model: ModelConfig = ModelConfig()
     data: DataConfig = DataConfig()
     optimization: OptimizationConfig = OptimizationConfig()
+    losses: LossesConfig = Field(default_factory=LossesConfig)
     ranking: RankingConfig = RankingConfig()
     inference: InferenceConfig = InferenceConfig()
     run: RunConfig
+
+    @model_validator(mode="after")
+    def _asmr_requires_hard_query_adapter(self) -> ExperimentConfig:
+        if self.losses.asmr_aux.weight > 0.0 and not self.model.hard_query_adapter:
+            raise ValueError(
+                "losses.asmr_aux.weight > 0 requires model.hard_query_adapter=true"
+            )
+        return self
 
 
 def _resolve(path: Path | None, project_root: Path) -> Path | None:
