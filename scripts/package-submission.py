@@ -126,6 +126,9 @@ def _zip_submission(source: Path, destination: Path) -> None:
 
 
 def main() -> None:
+    from src.wacv.utils import configure_default_logging
+
+    configure_default_logging()
     args = parse_args()
     template = args.template.resolve()
     out = args.out.resolve()

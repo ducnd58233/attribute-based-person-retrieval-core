@@ -48,7 +48,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     from src.wacv.remote.env import load_dotenv
+    from src.wacv.utils import configure_default_logging
 
+    configure_default_logging()
     load_dotenv(ROOT / ".env")
     args = parse_args()
     args.func(args)

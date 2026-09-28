@@ -193,7 +193,9 @@ def main() -> None:
     from src.wacv.models import build_model
     from src.wacv.models.clip import ClipAttributeClassifier
     from src.wacv.monitoring.tracking import RunTracker
+    from src.wacv.utils import configure_default_logging
 
+    configure_default_logging()
     config = load_config(parse_args().config)
     seed_everything(config.run.seed)
     device = resolve_device(config.run.device)

@@ -295,7 +295,9 @@ def _merge_metrics_file(
 
 def main() -> None:
     from src.wacv.config import load_config
+    from src.wacv.utils import configure_default_logging
 
+    configure_default_logging()
     args = parse_args()
     config = load_config(args.config)
     checkpoint = args.checkpoint or (
