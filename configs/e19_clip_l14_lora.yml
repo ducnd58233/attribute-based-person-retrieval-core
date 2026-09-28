@@ -18,7 +18,7 @@ data:
     - PETA
 
 optimization:
-  epochs: 8
+  epochs: 4  # was 8; Kaggle T4 ~12h cancel mid ep7/8
   learning_rate: 0.0001
   weight_decay: 0.01
   pos_weight_clip: 10.0
