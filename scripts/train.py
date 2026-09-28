@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 
 if TYPE_CHECKING:
     from src.wacv.config import ExperimentConfig
-    from src.wacv.engine import RankingEvalData
+    from src.wacv.engine import AsmrTrainContext, RankingEvalData
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -33,8 +33,26 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def build_asmr_supervision(
+    config: ExperimentConfig,
+) -> tuple[dict[str, int] | None, AsmrTrainContext | None]:
+    from src.wacv.data import load_task2_train_query_supervision
+    from src.wacv.engine import AsmrTrainContext
+
+    if config.losses.asmr_aux.weight <= 0.0:
+        return None, None
+    mapping, queries = load_task2_train_query_supervision(config.data.root)
+    context = AsmrTrainContext(
+        train_query_vectors=torch.from_numpy(queries.astype("float32"))
+    )
+    return mapping, context
+
+
 def build_loaders(
-    config: ExperimentConfig, device: torch.device
+    config: ExperimentConfig,
+    device: torch.device,
+    *,
+    query_id_by_image: dict[str, int] | None = None,
 ) -> tuple[DataLoader, DataLoader, torch.Tensor, torch.Tensor, int]:
     from src.wacv.attributes import attribute_names_from_columns
     from src.wacv.data import (
@@ -73,7 +91,11 @@ def build_loaders(
         config.model.name, train=False, image_size=image_size
     )
     train_dataset = AttributeDataset(
-        train_gt, config.data.root, train_transform, attribute_names=attribute_names
+        train_gt,
+        config.data.root,
+        train_transform,
+        attribute_names=attribute_names,
+        query_id_by_image=query_id_by_image,
     )
     val_dataset = AttributeDataset(
         val_gt, config.data.root, eval_transform, attribute_names=attribute_names
@@ -204,8 +226,9 @@ def main() -> None:
             "no CUDA available; training on CPU (slow for ConvNeXt). "
             "On Colab: Runtime → Change runtime type → GPU."
         )
+    query_id_by_image, asmr_context = build_asmr_supervision(config)
     train_loader, val_loader, pos_weight, prior, num_attributes = build_loaders(
-        config, device
+        config, device, query_id_by_image=query_id_by_image
     )
     ranking = build_ranking_eval(config, device)
 
@@ -258,7 +281,14 @@ def main() -> None:
                 config.optimization.lp_learning_rate,
             )
             Trainer(
-                model, lp_optimizer, lp_scheduler, criterion, device, tracker, lp_config
+                model,
+                lp_optimizer,
+                lp_scheduler,
+                criterion,
+                device,
+                tracker,
+                lp_config,
+                asmr_context=asmr_context,
             ).fit(train_loader, val_loader, ranking=ranking)
             model.unfreeze_backbone()
             ft_groups = model.layerwise_param_groups(
@@ -285,7 +315,14 @@ def main() -> None:
             patience=config.optimization.scheduler_patience,
         )
         result = Trainer(
-            model, optimizer, scheduler, criterion, device, tracker, config
+            model,
+            optimizer,
+            scheduler,
+            criterion,
+            device,
+            tracker,
+            config,
+            asmr_context=asmr_context,
         ).fit(train_loader, val_loader, ranking=ranking)
         tracker.logger.info(
             "finished start_epoch=%d end_epoch=%d global_step=%d best_val_loss=%.6f",

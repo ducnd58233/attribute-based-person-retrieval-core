@@ -100,6 +100,27 @@ def load_query_ids(csv_path: Path) -> pd.DataFrame:
     return pd.read_csv(csv_path, names=["image", "query_id"], header=None)
 
 
+def load_task2_train_query_supervision(
+    data_root: Path,
+) -> tuple[dict[str, int], np.ndarray]:
+    """Task-2 train split only: image -> query_id and full query attribute matrix."""
+    train_root = data_root / "annotations" / "task2" / "train"
+    ids_path = train_root / "ids.csv"
+    queries_path = train_root / "queries.csv"
+    if not ids_path.is_file() or not queries_path.is_file():
+        raise FileNotFoundError(
+            f"Task-2 train ids/queries missing under {train_root}; "
+            "ASMR aux requires task2/train/ids.csv and queries.csv"
+        )
+    ids_df = load_query_ids(ids_path)
+    queries = load_queries(queries_path)
+    mapping = {
+        str(image): int(query_id)
+        for image, query_id in zip(ids_df["image"], ids_df["query_id"], strict=True)
+    }
+    return mapping, queries
+
+
 def domain_from_image(image_path: str) -> str:
     """Return the dataset domain from an `image` column value (first path segment)."""
     domain = Path(str(image_path).replace("\\", "/")).parts[0]
@@ -157,6 +178,7 @@ class AttributeDataset(Dataset):
         transform: transforms.Compose = IMAGE_TRANSFORM,
         *,
         attribute_names: tuple[str, ...] | None = None,
+        query_id_by_image: dict[str, int] | None = None,
     ) -> None:
         self._gt = gt.reset_index(drop=True)
         self._images_root = Path(images_root)
@@ -164,6 +186,13 @@ class AttributeDataset(Dataset):
         self._attribute_names = attribute_names or attribute_names_from_columns(
             tuple(str(c) for c in self._gt.columns)
         )
+        if query_id_by_image is not None:
+            self._query_ids = [
+                int(query_id_by_image.get(str(row["image"]), -1))
+                for _, row in self._gt.iterrows()
+            ]
+        else:
+            self._query_ids = None
 
     @property
     def attribute_names(self) -> tuple[str, ...]:
@@ -172,7 +201,9 @@ class AttributeDataset(Dataset):
     def __len__(self) -> int:
         return len(self._gt)
 
-    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(
+        self, index: int
+    ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, int]:
         row = self._gt.iloc[index]
         image = Image.open(self._images_root / row["image"]).convert("RGB")
         transformed = self._transform(image)
@@ -181,4 +212,6 @@ class AttributeDataset(Dataset):
         attrs = torch.from_numpy(
             row[list(self._attribute_names)].to_numpy(dtype=np.float32)
         )
-        return transformed, attrs
+        if self._query_ids is None:
+            return transformed, attrs
+        return transformed, attrs, self._query_ids[index]

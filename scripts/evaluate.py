@@ -276,6 +276,24 @@ def evaluate_checkpoint(
             distance=distance_name,
             calibration_out=calibration_path,
         )
+        from src.wacv.query_adapter import AttributeModelWithHardQuery
+
+        if (
+            isinstance(model, AttributeModelWithHardQuery)
+            and config.model.hard_query_adapter
+            and distance_name != "clear_hard"
+        ):
+            fused_key = f"{protocol}_fused"
+            results[fused_key] = _evaluate_protocol(
+                config=config,
+                model=model,
+                device=device,
+                ground_truth=ground_truth,
+                queries=queries,
+                attribute_names=names,
+                distance="clear_hard",
+                calibration_out=None,
+            )
     return results, config
 
 

@@ -78,6 +78,8 @@ class _HardQueryAdapter(nn.Module):
             nn.GELU(),
             nn.Linear(adapter_dim, adapter_dim),
         )
+        self.semantic_weight_logits = nn.Parameter(torch.zeros(num_attributes))
+        self.margin_scale = nn.Parameter(torch.tensor(0.0))
 
     def encode_queries(self, queries: torch.Tensor) -> torch.Tensor:
         return F.normalize(self.query_proj(queries.float()), dim=-1)
