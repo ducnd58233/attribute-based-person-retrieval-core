@@ -11,6 +11,10 @@ from src.wacv.query_adapter import attach_hard_query_adapter
 
 def build_model(config: ModelConfig, *, num_attributes: int) -> nn.Module:
     """Build one of the explicitly supported attribute classifiers."""
+    if config.mixstyle.enabled and not config.name.startswith("convnext_"):
+        raise ValueError(
+            f"model.mixstyle requires a ConvNeXt backbone, got {config.name!r}"
+        )
     if config.name == "resnet50":
         backbone: nn.Module = build_resnet50(
             num_attributes, pretrained=config.pretrained, dropout=config.dropout
@@ -41,6 +45,7 @@ def build_model(config: ModelConfig, *, num_attributes: int) -> nn.Module:
             num_attributes,
             pretrained=config.pretrained,
             dropout=config.dropout,
+            mixstyle=config.mixstyle,
         )
     if not config.hard_query_adapter:
         return backbone

@@ -39,6 +39,8 @@ def build_loaders(
     from src.wacv.attributes import attribute_names_from_columns
     from src.wacv.data import (
         AttributeDataset,
+        DomainBalancedBatchSampler,
+        domain_from_image,
         filter_gt_by_domains,
         load_gt,
         transforms_for_model,
@@ -79,21 +81,37 @@ def build_loaders(
         val_gt, config.data.root, eval_transform, attribute_names=attribute_names
     )
     workers = resolve_num_workers(config.data.num_workers)
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config.data.batch_size,
-        shuffle=True,
-        num_workers=workers,
-        pin_memory=device.type == "cuda",
-        persistent_workers=workers > 0,
-    )
+    pin_memory = device.type == "cuda"
+    persistent_workers = workers > 0
+    if config.data.domain_balanced:
+        train_domains = [domain_from_image(str(path)) for path in train_gt["image"]]
+        train_loader = DataLoader(
+            train_dataset,
+            batch_sampler=DomainBalancedBatchSampler(
+                train_domains,
+                batch_size=config.data.batch_size,
+                seed=config.run.seed,
+            ),
+            num_workers=workers,
+            pin_memory=pin_memory,
+            persistent_workers=persistent_workers,
+        )
+    else:
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=config.data.batch_size,
+            shuffle=True,
+            num_workers=workers,
+            pin_memory=pin_memory,
+            persistent_workers=persistent_workers,
+        )
     val_loader = DataLoader(
         val_dataset,
         batch_size=config.data.batch_size,
         shuffle=False,
         num_workers=workers,
-        pin_memory=device.type == "cuda",
-        persistent_workers=workers > 0,
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers,
     )
 
     positive_rates = train_gt[list(attribute_names)].astype(float).mean()

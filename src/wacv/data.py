@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections import defaultdict
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import torch
 from PIL import Image
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 from torchvision import transforms
 
 from src.wacv.attributes import attribute_names_from_columns
@@ -145,6 +146,93 @@ def build_lodo_m_split(
     _, first_index = np.unique(attrs, axis=0, return_index=True)
     queries = attrs[np.sort(first_index)]
     return gallery, queries
+
+
+class DomainBalancedBatchSampler(Sampler[list[int]]):
+    """Yield batches with an equal number of samples from each domain.
+
+    Requires ``batch_size`` divisible by the number of distinct domains and
+    each domain to hold at least ``batch_size // n_domains`` samples. Shorter
+    domains wrap (re-shuffled) so the longest domain is covered once per epoch.
+    """
+
+    def __init__(
+        self,
+        domains: Sequence[str],
+        batch_size: int,
+        *,
+        seed: int = 0,
+    ) -> None:
+        if batch_size < 1:
+            raise ValueError(f"batch_size must be >= 1, got {batch_size}")
+        by_domain: dict[str, list[int]] = defaultdict(list)
+        for index, domain in enumerate(domains):
+            by_domain[str(domain)].append(index)
+        if len(by_domain) < 2:
+            raise ValueError(
+                "DomainBalancedBatchSampler needs at least two domains, "
+                f"got {sorted(by_domain)}"
+            )
+        if batch_size % len(by_domain) != 0:
+            raise ValueError(
+                f"batch_size {batch_size} must be divisible by "
+                f"{len(by_domain)} domains"
+            )
+        self._domain_order = tuple(sorted(by_domain))
+        self._indices = {
+            domain: list(by_domain[domain]) for domain in self._domain_order
+        }
+        self._per_domain = batch_size // len(self._domain_order)
+        self._seed = seed
+        self._epoch = 0
+        too_small = {
+            domain: len(indices)
+            for domain, indices in self._indices.items()
+            if len(indices) < self._per_domain
+        }
+        if too_small:
+            raise ValueError(
+                "Each domain needs at least "
+                f"{self._per_domain} samples; too small: {too_small}"
+            )
+        longest = max(len(indices) for indices in self._indices.values())
+        self._num_batches = longest // self._per_domain
+
+    @property
+    def domain_order(self) -> tuple[str, ...]:
+        """Sorted domain names used when assembling each batch."""
+        return self._domain_order
+
+    @property
+    def per_domain(self) -> int:
+        """Number of samples taken from each domain in a batch."""
+        return self._per_domain
+
+    def __len__(self) -> int:
+        return self._num_batches
+
+    def __iter__(self) -> Iterator[list[int]]:
+        rng = np.random.default_rng(self._seed + self._epoch)
+        self._epoch += 1
+        shuffled = {
+            domain: rng.permutation(indices).tolist()
+            for domain, indices in self._indices.items()
+        }
+        cursor = dict.fromkeys(self._domain_order, 0)
+        for _ in range(self._num_batches):
+            batch: list[int] = []
+            for domain in self._domain_order:
+                pool = shuffled[domain]
+                for _ in range(self._per_domain):
+                    if cursor[domain] >= len(pool):
+                        shuffled[domain] = rng.permutation(
+                            self._indices[domain]
+                        ).tolist()
+                        cursor[domain] = 0
+                        pool = shuffled[domain]
+                    batch.append(pool[cursor[domain]])
+                    cursor[domain] += 1
+            yield batch
 
 
 class AttributeDataset(Dataset):

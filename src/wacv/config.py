@@ -70,6 +70,18 @@ class StrictConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
 
+class MixStyleConfig(StrictConfig):
+    """Insert MixStyle after early ConvNeXt stages (identity in eval)."""
+
+    enabled: bool = False
+    stages: list[PositiveInt] = Field(
+        default_factory=lambda: [1, 2],
+        description="1-based ConvNeXt stage indices to follow with MixStyle.",
+    )
+    p: float = Field(default=0.5, ge=0.0, le=1.0)
+    alpha: PositiveFloat = 0.1
+
+
 class ModelConfig(StrictConfig):
     name: ModelName = "convnext_base"
     pretrained: bool = True
@@ -82,6 +94,7 @@ class ModelConfig(StrictConfig):
         description="If >0, inject LoRA on CLIP attention out_proj (PEFT).",
     )
     lora_alpha: PositiveFloat = 16.0
+    mixstyle: MixStyleConfig = Field(default_factory=MixStyleConfig)
 
 
 class DataConfig(StrictConfig):
@@ -93,6 +106,10 @@ class DataConfig(StrictConfig):
     train_domains: list[DomainName] | None = None
     eval_domains: list[DomainName] | None = None
     image_size: ImageSize = (256, 128)
+    domain_balanced: bool = Field(
+        default=False,
+        description="Equal per-domain counts in each train batch (needs ≥2 domains).",
+    )
 
 
 class OptimizationConfig(StrictConfig):
