@@ -14,7 +14,9 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import logging
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -23,10 +25,22 @@ from typing import Final
 
 from src.wacv.remote.stage import ROOT, build_staging_dir
 
+logger = logging.getLogger(__name__)
+
 STAGING_DIR: Final[Path] = ROOT / "build" / "remote-kaggle"
 OUTPUT_DIR: Final[Path] = ROOT / "build" / "remote-kaggle-output"
-_TERMINAL_OK: Final[tuple[str, ...]] = ("complete",)
-_TERMINAL_FAIL: Final[tuple[str, ...]] = ("error", "cancel")
+
+# Match Kaggle's KernelWorkerStatus enum only - never bare substring "error",
+# which false-positives on ConnectTimeoutError / HTTPSConnectionPool text when
+# a poller concatenates CLI stderr into the status string.
+_TERMINAL_STATUS_RE: Final[re.Pattern[str]] = re.compile(
+    r"KernelWorkerStatus\.(COMPLETE|ERROR|CANCEL\w*)",
+    re.IGNORECASE,
+)
+_FAIL_STATUS_RE: Final[re.Pattern[str]] = re.compile(
+    r"KernelWorkerStatus\.(ERROR|CANCEL\w*)",
+    re.IGNORECASE,
+)
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -87,6 +101,16 @@ def write_kernel_metadata(staging_dir: Path, *, kernel_id: str, title: str) -> N
     )
 
 
+def is_terminal_status(status_text: str) -> bool:
+    """True when status reports a finished KernelWorkerStatus (not infra noise)."""
+    return _TERMINAL_STATUS_RE.search(status_text) is not None
+
+
+def is_failed_status(status_text: str) -> bool:
+    """True when status reports KernelWorkerStatus ERROR or CANCEL*."""
+    return _FAIL_STATUS_RE.search(status_text) is not None
+
+
 def kernel_status(kernel_id: str) -> str | None:
     """The kernel's status text, or None on a transient CLI/network hiccup.
 
@@ -102,7 +126,7 @@ def kernel_status(kernel_id: str) -> str | None:
             text=True,
         )
     except (subprocess.CalledProcessError, OSError) as exc:
-        print(f"transient status check failure, retrying: {exc}")
+        logger.warning("transient status check failure, retrying: %s", exc)
         return None
     return result.stdout.strip()
 
@@ -117,18 +141,19 @@ def wait_for_terminal_status(
         if status_text is not None:
             last_status = status_text
             elapsed_min = (time.monotonic() - started) / 60
-            print(f"[{elapsed_min:6.1f}m] {status_text}")
-            terminal_words = _TERMINAL_OK + _TERMINAL_FAIL
-            if any(word in status_text.lower() for word in terminal_words):
+            logger.info("[%6.1fm] %s", elapsed_min, status_text)
+            if is_terminal_status(status_text):
                 return status_text
         timed_out = (
             timeout_hours is not None
             and (time.monotonic() - started) > timeout_hours * 3600
         )
         if timed_out:
-            print(
-                f"local poll timed out after {timeout_hours}h; the kernel keeps "
-                f"running on Kaggle. Check later: kaggle kernels status {kernel_id}"
+            logger.warning(
+                "local poll timed out after %sh; the kernel keeps running on "
+                "Kaggle. Check later: kaggle kernels status %s",
+                timeout_hours,
+                kernel_id,
             )
             return last_status
         time.sleep(poll_interval)
@@ -146,7 +171,7 @@ def pull_run_into_local(output_dir: Path, run_name: str) -> Path | None:
 
 def run(args: argparse.Namespace) -> None:
     result = build_staging_dir(args.config, STAGING_DIR)
-    print(f"staged {result.staging_dir} (run={result.run_name})")
+    logger.info("staged %s (run=%s)", result.staging_dir, result.run_name)
 
     if args.stage_only:
         return
@@ -176,7 +201,7 @@ def run(args: argparse.Namespace) -> None:
         ],
         check=True,
     )
-    print(f"pushed {kernel_id}; polling every {args.poll_interval:.0f}s")
+    logger.info("pushed %s; polling every %.0fs", kernel_id, args.poll_interval)
 
     final_status = wait_for_terminal_status(
         kernel_id, poll_interval=args.poll_interval, timeout_hours=args.timeout_hours
@@ -190,13 +215,13 @@ def run(args: argparse.Namespace) -> None:
     )
     landed = pull_run_into_local(OUTPUT_DIR, result.run_name)
 
-    failed = any(word in final_status.lower() for word in _TERMINAL_FAIL)
+    failed = is_failed_status(final_status)
     if failed or landed is None:
-        print(f"kernel page for logs: https://www.kaggle.com/code/{kernel_id}")
+        logger.error("kernel page for logs: https://www.kaggle.com/code/%s", kernel_id)
         if failed:
             raise SystemExit(f"kernel did not complete: {final_status}")
         raise SystemExit(
             f"kernel completed but runs/{result.run_name}/ was not in its output"
         )
 
-    print(f"done: {landed}")
+    logger.info("done: %s", landed)
