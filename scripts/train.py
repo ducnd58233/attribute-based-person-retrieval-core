@@ -23,6 +23,65 @@ if str(ROOT) not in sys.path:
 LOGGER = logging.getLogger(__name__)
 
 
+def _join_task2_query_ids(
+    train_gt: object,
+    data_root: Path,
+    *,
+    limit: int | None,
+) -> tuple[object, object, torch.Tensor]:
+    """Inner-join task-2 train ids onto ``train_gt``; return gt, ids, query table."""
+    import numpy as np
+    import pandas as pd
+
+    from src.wacv.data import load_queries, load_query_ids
+
+    if not isinstance(train_gt, pd.DataFrame):
+        raise TypeError("train_gt must be a DataFrame")
+    task2_train = data_root / "annotations" / "task2" / "train"
+    ids_path = task2_train / "ids.csv"
+    queries_path = task2_train / "queries.csv"
+    if not ids_path.is_file() or not queries_path.is_file():
+        raise FileNotFoundError(
+            f"smooth_ap_aux requires task-2 train ids/queries under {task2_train}"
+        )
+    ids_df = load_query_ids(ids_path)
+    id_by_image = {
+        str(row.image): int(row.query_id) for row in ids_df.itertuples(index=False)
+    }
+    joined = train_gt.loc[train_gt["image"].astype(str).isin(id_by_image)].reset_index(
+        drop=True
+    )
+    if limit is not None:
+        joined = joined.iloc[:limit].reset_index(drop=True)
+    query_ids = joined["image"].astype(str).map(id_by_image).to_numpy(dtype=np.int64)
+    query_table = torch.tensor(load_queries(queries_path), dtype=torch.float32)
+    return joined, query_ids, query_table
+
+
+def _attach_smooth_ap_if_needed(
+    trainer: object,
+    query_table: torch.Tensor | None,
+    config: ExperimentConfig,
+    logger: logging.Logger,
+) -> None:
+    """Wire Smooth-AP query table onto ``trainer`` when aux weight is active."""
+    if query_table is None:
+        return
+    from src.wacv.engine import Trainer
+
+    if not isinstance(trainer, Trainer):
+        raise TypeError("trainer must be a Trainer")
+    trainer.attach_query_table(query_table)
+    aux = config.losses.smooth_ap_aux
+    logger.info(
+        "smooth_ap_aux weight=%.3f tau=%.4f P=%d K=%d",
+        aux.weight,
+        aux.tau,
+        aux.p,
+        aux.k,
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -35,10 +94,13 @@ def parse_args() -> argparse.Namespace:
 
 def build_loaders(
     config: ExperimentConfig, device: torch.device
-) -> tuple[DataLoader, DataLoader, torch.Tensor, torch.Tensor, int]:
+) -> tuple[
+    DataLoader, DataLoader, torch.Tensor, torch.Tensor, int, torch.Tensor | None
+]:
     from src.wacv.attributes import attribute_names_from_columns
     from src.wacv.data import (
         AttributeDataset,
+        QueryPkSampler,
         filter_gt_by_domains,
         load_gt,
         transforms_for_model,
@@ -72,27 +134,53 @@ def build_loaders(
     eval_transform = transforms_for_model(
         config.model.name, train=False, image_size=image_size
     )
+
+    train_query_ids = None
+    query_table: torch.Tensor | None = None
+    aux = config.losses.smooth_ap_aux
+    if aux.weight > 0.0:
+        train_gt, train_query_ids, query_table = _join_task2_query_ids(
+            train_gt, config.data.root, limit=config.data.limit
+        )
+
     train_dataset = AttributeDataset(
-        train_gt, config.data.root, train_transform, attribute_names=attribute_names
+        train_gt,
+        config.data.root,
+        train_transform,
+        attribute_names=attribute_names,
+        query_ids=train_query_ids,
     )
     val_dataset = AttributeDataset(
         val_gt, config.data.root, eval_transform, attribute_names=attribute_names
     )
     workers = resolve_num_workers(config.data.num_workers)
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config.data.batch_size,
-        shuffle=True,
-        num_workers=workers,
-        pin_memory=device.type == "cuda",
-        persistent_workers=workers > 0,
-    )
+    pin = device.type == "cuda"
+    if aux.weight > 0.0:
+        assert train_query_ids is not None
+        train_loader = DataLoader(
+            train_dataset,
+            batch_sampler=QueryPkSampler(
+                train_query_ids, p=aux.p, k=aux.k, seed=config.run.seed
+            ),
+            num_workers=workers,
+            pin_memory=pin,
+            persistent_workers=workers > 0,
+        )
+    else:
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=config.data.batch_size,
+            shuffle=True,
+            num_workers=workers,
+            pin_memory=pin,
+            persistent_workers=workers > 0,
+        )
     val_loader = DataLoader(
         val_dataset,
         batch_size=config.data.batch_size,
         shuffle=False,
         num_workers=workers,
-        pin_memory=device.type == "cuda",
+        pin_memory=pin,
         persistent_workers=workers > 0,
     )
 
@@ -103,7 +191,14 @@ def build_loaders(
     )
     pos_weight = torch.tensor(weights.to_numpy(), dtype=torch.float32)
     prior = torch.tensor(positive_rates.to_numpy(), dtype=torch.float32)
-    return train_loader, val_loader, pos_weight, prior, len(attribute_names)
+    return (
+        train_loader,
+        val_loader,
+        pos_weight,
+        prior,
+        len(attribute_names),
+        query_table,
+    )
 
 
 def build_ranking_eval(
@@ -202,8 +297,8 @@ def main() -> None:
             "no CUDA available; training on CPU (slow for ConvNeXt). "
             "On Colab: Runtime → Change runtime type → GPU."
         )
-    train_loader, val_loader, pos_weight, prior, num_attributes = build_loaders(
-        config, device
+    train_loader, val_loader, pos_weight, prior, num_attributes, query_table = (
+        build_loaders(config, device)
     )
     ranking = build_ranking_eval(config, device)
 
@@ -282,9 +377,16 @@ def main() -> None:
             factor=config.optimization.scheduler_factor,
             patience=config.optimization.scheduler_patience,
         )
-        result = Trainer(
+        trainer = Trainer(
             model, optimizer, scheduler, criterion, device, tracker, config
-        ).fit(train_loader, val_loader, ranking=ranking)
+        )
+        _attach_smooth_ap_if_needed(
+            trainer,
+            None if query_table is None else query_table.to(device),
+            config,
+            tracker.logger,
+        )
+        result = trainer.fit(train_loader, val_loader, ranking=ranking)
         tracker.logger.info(
             "finished start_epoch=%d end_epoch=%d global_step=%d best_val_loss=%.6f",
             result.start_epoch,

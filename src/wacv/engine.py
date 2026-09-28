@@ -21,11 +21,11 @@ from tqdm.contrib.logging import logging_redirect_tqdm
 from src.wacv.checkpoint import CheckpointManager
 from src.wacv.config import DeviceName, ExperimentConfig
 from src.wacv.evaluation import compute_ranking_metrics
-from src.wacv.losses import hard_query_infonce
+from src.wacv.losses import hard_query_infonce, smooth_ap_aux_from_logits
 from src.wacv.monitoring.tracking import RunTracker
 from src.wacv.query_adapter import AttributeModelWithHardQuery
 
-BatchIterable = Iterable[tuple[torch.Tensor, torch.Tensor]]
+BatchIterable = Iterable[tuple[torch.Tensor, ...]]
 
 
 @dataclass(frozen=True)
@@ -109,25 +109,43 @@ class Trainer:
         self.checkpoints = CheckpointManager(
             model, optimizer, scheduler, self.scaler, self.ema_model, config
         )
+        self._query_table: torch.Tensor | None = None
+
+    def attach_query_table(self, query_table: torch.Tensor) -> None:
+        """Register task-2 query attribute vectors for Smooth-AP aux (E16)."""
+        self._query_table = query_table.detach().float()
 
     def _batch_training_loss(
-        self, batch_images: torch.Tensor, batch_targets: torch.Tensor
+        self,
+        batch_images: torch.Tensor,
+        batch_targets: torch.Tensor,
+        batch_query_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         smoothing = self.config.optimization.label_smoothing
         loss_targets = batch_targets * (1.0 - smoothing) + 0.5 * smoothing
         logits = self.model(batch_images)
         loss = self.criterion(logits, loss_targets)
         match_weight = self.config.optimization.query_match_weight
-        if match_weight <= 0.0:
-            return loss
-        root = self.model
-        if not isinstance(root, AttributeModelWithHardQuery):
-            raise TypeError("query_match_weight > 0 requires hard_query_adapter")
-        return loss + match_weight * hard_query_infonce(
-            root.gallery_embeddings(batch_images),
-            root.query_embeddings(batch_targets),
-            temperature=self.config.optimization.query_match_temperature,
-        )
+        if match_weight > 0.0:
+            root = self.model
+            if not isinstance(root, AttributeModelWithHardQuery):
+                raise TypeError("query_match_weight > 0 requires hard_query_adapter")
+            loss = loss + match_weight * hard_query_infonce(
+                root.gallery_embeddings(batch_images),
+                root.query_embeddings(batch_targets),
+                temperature=self.config.optimization.query_match_temperature,
+            )
+        aux = self.config.losses.smooth_ap_aux
+        if aux.weight > 0.0:
+            if batch_query_ids is None:
+                raise ValueError("smooth_ap_aux.weight > 0 requires query_id batches")
+            if self._query_table is None:
+                raise ValueError("smooth_ap_aux.weight > 0 requires attach_query_table")
+            query_vectors = self._query_table[batch_query_ids]
+            loss = loss + aux.weight * smooth_ap_aux_from_logits(
+                logits, query_vectors, batch_query_ids, tau=aux.tau
+            )
+        return loss
 
     def _step_optimizer(self, loss: torch.Tensor, *, use_amp: bool) -> None:
         if use_amp:
@@ -153,6 +171,9 @@ class Trainer:
 
     def _train_epoch(self, loader: BatchIterable, epoch: int) -> tuple[float, int]:
         self.model.train()
+        batch_sampler = getattr(loader, "batch_sampler", None)
+        if batch_sampler is not None and hasattr(batch_sampler, "set_epoch"):
+            batch_sampler.set_epoch(epoch)
         total_loss = 0.0
         total_samples = 0
         global_step_delta = 0
@@ -164,12 +185,20 @@ class Trainer:
         )
         use_amp = self.scaler.is_enabled()
         autocast_type = "cuda" if use_amp else "cpu"
-        for images, targets in batches:
+        for batch in batches:
+            if len(batch) == 3:
+                images, targets, query_ids = batch
+                batch_query_ids = query_ids.to(self.device, non_blocking=True)
+            else:
+                images, targets = batch
+                batch_query_ids = None
             batch_images = images.to(self.device, non_blocking=True)
             batch_targets = targets.to(self.device, non_blocking=True)
             self.optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type=autocast_type, enabled=use_amp):
-                loss = self._batch_training_loss(batch_images, batch_targets)
+                loss = self._batch_training_loss(
+                    batch_images, batch_targets, batch_query_ids
+                )
             self._step_optimizer(loss, use_amp=use_amp)
             batch_size = batch_targets.shape[0]
             total_loss += loss.detach().item() * batch_size
@@ -193,7 +222,8 @@ class Trainer:
         use_amp = self.scaler.is_enabled()
         autocast_type = "cuda" if use_amp else "cpu"
         with torch.inference_mode():
-            for images, targets in batches:
+            for batch in batches:
+                images, targets = batch[0], batch[1]
                 batch_images = images.to(self.device, non_blocking=True)
                 batch_targets = targets.to(self.device, non_blocking=True)
                 with torch.autocast(device_type=autocast_type, enabled=use_amp):

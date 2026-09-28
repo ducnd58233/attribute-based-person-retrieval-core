@@ -128,6 +128,21 @@ class OptimizationConfig(StrictConfig):
     )
 
 
+class SmoothApAuxConfig(StrictConfig):
+    """Smooth-AP auxiliary ranking loss over P×K query-id batches (E16 / H16)."""
+
+    weight: float = Field(default=0.0, ge=0.0, le=5.0)
+    tau: PositiveFloat = 0.01
+    p: PositiveInt = 16
+    k: PositiveInt = 4
+
+
+class LossesConfig(StrictConfig):
+    """Optional auxiliary losses stacked on the attribute criterion."""
+
+    smooth_ap_aux: SmoothApAuxConfig = Field(default_factory=SmoothApAuxConfig)
+
+
 class RunConfig(StrictConfig):
     name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
     output_dir: ConfigPath = Path("runs")
@@ -197,6 +212,7 @@ class ExperimentConfig(StrictConfig):
     optimization: OptimizationConfig = OptimizationConfig()
     ranking: RankingConfig = RankingConfig()
     inference: InferenceConfig = InferenceConfig()
+    losses: LossesConfig = Field(default_factory=LossesConfig)
     run: RunConfig
 
 
