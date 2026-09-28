@@ -133,6 +133,38 @@ here.
   same predict → rank → score sequence across several earlier PRs before
   one refactor finally noticed and extracted `compute_ranking_metrics` -
   the second copy should never have been written standalone.
+- **A memory fix for a ranking function is not done until the whole
+  ranking stage is profiled at real gallery scale, not just the one
+  function that was touched (MUST):** Codabench submission 948099 was
+  "fixed" by making `_dual_softmax_rerank` chunked float32 (see the
+  dtype-mirroring rule above); the very next submission (948604), same
+  zip pattern, failed with the identical opaque error. Profiling the
+  *whole* ranking stage at the real E17 shape (Q=3462, G=33407) - not
+  just the function that was already suspected - found the actual
+  remaining peak was in `_hybrid_distance`/`_minmax_per_query`, never
+  touched by the first fix. After any change meant to fix or bound a
+  submission-side OOM, profile peak RSS across the full call it sits
+  inside (`rank_gallery`, not just the one function), at the real
+  gallery/query counts recorded in this submission's own
+  `records/submissions/*/SUMMARY.md` - a unit test on a small array
+  proves the formula, never the memory footprint.
+- **Prefer numpy's in-place ops (`+=`, `out=`, mutate-and-return) over the
+  naive expression form for any O(Q×G) array on the submission's ranking
+  path (MUST):** `a + b - 2*c`, `np.where(cond, x, np.zeros_like(y))`, and
+  `weight * a + (1 - weight) * b` each read as a single line but allocate
+  one full-size temporary per operator - on a ~3462×33407 gallery that is
+  ~463MB per float32 temporary, and several stack up across one
+  expression. `_hybrid_distance`, `_minmax_per_query`, `_nll_distance`,
+  and `_l1_distance` (and their identical library copies in
+  `src/wacv/evaluation/__init__.py`) held up to four such arrays alive at
+  once before this was rewritten to mutate a single scratch buffer
+  through each step - cut measured peak RSS on the real shape by 47%
+  (2808MB -> 1492MB) with zero output change (verified against this
+  repo's own naive-loop parity tests, not assumed). Apply this only where
+  the array being mutated is a scratch value nothing else reads
+  afterward - state that ownership assumption in the function's
+  docstring, the way `_dual_softmax_rerank`'s and `_minmax_per_query`'s
+  now do, so a future caller does not get a silently mutated argument.
 - **No decorative runtime strings (MUST):** do not add print/log messages
   whose only job is to narrate that a check "passed cleanly" or similar
   fluff (e.g. `run.py imports cleanly with no network access`). Docker /
