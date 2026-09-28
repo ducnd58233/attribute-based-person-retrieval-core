@@ -192,6 +192,7 @@ def main() -> None:
     from src.wacv.losses import build_attribute_criterion
     from src.wacv.models import build_model
     from src.wacv.models.clip import ClipAttributeClassifier
+    from src.wacv.models.dinov2 import Dinov2AttributeClassifier
     from src.wacv.monitoring.tracking import RunTracker
 
     config = load_config(parse_args().config)
@@ -231,7 +232,10 @@ def main() -> None:
             ranking is not None,
             config.optimization.lp_ft,
         )
-        if config.optimization.lp_ft and isinstance(model, ClipAttributeClassifier):
+        lp_ft_ready = isinstance(
+            model, (ClipAttributeClassifier, Dinov2AttributeClassifier)
+        )
+        if config.optimization.lp_ft and lp_ft_ready:
             model.freeze_backbone()
             lp_config = config.model_copy(
                 update={

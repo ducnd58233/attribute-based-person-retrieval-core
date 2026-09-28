@@ -15,6 +15,7 @@ ModelName = Literal[
     "convnext_base",
     "clip_vit_b16",
     "clip_vit_l14",
+    "dinov2_vitb14_reg",
 ]
 DeviceName = Literal["auto", "cpu", "cuda", "tpu"]
 DistanceName = Literal[
@@ -82,6 +83,13 @@ class ModelConfig(StrictConfig):
         description="If >0, inject LoRA on CLIP attention out_proj (PEFT).",
     )
     lora_alpha: PositiveFloat = 16.0
+    weights_path: ConfigPath | None = Field(
+        default=None,
+        description=(
+            "Optional local backbone checkpoint (e.g. vendored DINOv2 .pth). "
+            "When set, skip hub weight download and load this file instead."
+        ),
+    )
 
 
 class DataConfig(StrictConfig):
@@ -227,6 +235,9 @@ def load_config(path: Path, *, project_root: Path | None = None) -> ExperimentCo
     )
 
     data = config.data.model_copy(update={"root": _resolve(config.data.root, root)})
+    model = config.model.model_copy(
+        update={"weights_path": _resolve(config.model.weights_path, root)}
+    )
     output_dir = _resolve(config.run.output_dir, root)
     if output_dir is None:
         raise ValueError("run.output_dir resolved to None")
@@ -239,4 +250,4 @@ def load_config(path: Path, *, project_root: Path | None = None) -> ExperimentCo
             "init_weights": _resolve(config.run.init_weights, root),
         }
     )
-    return config.model_copy(update={"data": data, "run": run})
+    return config.model_copy(update={"model": model, "data": data, "run": run})

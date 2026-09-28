@@ -6,6 +6,7 @@ import argparse
 import json
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -30,6 +31,23 @@ METRIC_KEY_MAP = {
     "mINP": "minp",
     "mA": "ma",
 }
+
+
+@dataclass(frozen=True)
+class ProbabilityEnsemble:
+    """Second model whose probs are mixed with the primary (E20 + C-lodo)."""
+
+    model: torch.nn.Module
+    config: ExperimentConfig
+    weight: float = 0.5
+
+
+@dataclass(frozen=True)
+class ProtocolEvalOptions:
+    """Optional calibration dump path and/or probability ensemble."""
+
+    calibration_out: Path | None = None
+    ensemble: ProbabilityEnsemble | None = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -62,6 +80,24 @@ def parse_args() -> argparse.Namespace:
         ),
         default=None,
         help="override ranking.distance from the config",
+    )
+    parser.add_argument(
+        "--ensemble-checkpoint",
+        type=Path,
+        default=None,
+        help="optional second checkpoint for a probability average (E20 + C-lodo)",
+    )
+    parser.add_argument(
+        "--ensemble-config",
+        type=Path,
+        default=None,
+        help="config for --ensemble-checkpoint (required when that flag is set)",
+    )
+    parser.add_argument(
+        "--ensemble-weight",
+        type=float,
+        default=0.5,
+        help="weight on the primary model probs; rest on the ensemble model",
     )
     return parser.parse_args()
 
@@ -99,28 +135,18 @@ def _protocol_metrics_keys(
     return out
 
 
-def _evaluate_protocol(
+def _predict_gallery_probabilities(
     *,
     config: ExperimentConfig,
     model: torch.nn.Module,
     device: torch.device,
     ground_truth,
-    queries: np.ndarray,
     attribute_names: tuple[str, ...],
-    distance: str,
-    calibration_out: Path | None = None,
-) -> dict[str, float]:
+) -> np.ndarray:
+    """Run TTA probability prediction for one model/config pair."""
     from src.wacv.data import AttributeDataset, transforms_for_model
     from src.wacv.engine import resolve_num_workers
-    from src.wacv.evaluation import (
-        apply_per_attribute_temperatures,
-        dual_softmax_rerank,
-        fit_per_attribute_temperatures,
-        mean_accuracy,
-        predict_probabilities,
-        ranking_distance,
-    )
-    from src.wacv.monitoring.metrics import evaluate_ranking
+    from src.wacv.evaluation import predict_probabilities
 
     workers = resolve_num_workers(config.data.num_workers)
     loader = DataLoader(
@@ -142,8 +168,7 @@ def _evaluate_protocol(
         pin_memory=device.type == "cuda",
         persistent_workers=workers > 0,
     )
-    started = time.perf_counter()
-    probabilities = predict_probabilities(
+    return predict_probabilities(
         model,
         loader,
         device,
@@ -151,6 +176,55 @@ def _evaluate_protocol(
         tta=config.inference.tta,
         tta_scale=float(config.inference.tta_scale),
     )
+
+
+def _evaluate_protocol(
+    *,
+    config: ExperimentConfig,
+    model: torch.nn.Module,
+    device: torch.device,
+    ground_truth,
+    queries: np.ndarray,
+    attribute_names: tuple[str, ...],
+    distance: str,
+    options: ProtocolEvalOptions | None = None,
+) -> dict[str, float]:
+    from src.wacv.data import AttributeDataset, transforms_for_model
+    from src.wacv.engine import resolve_num_workers
+    from src.wacv.evaluation import (
+        apply_per_attribute_temperatures,
+        dual_softmax_rerank,
+        fit_per_attribute_temperatures,
+        mean_accuracy,
+        ranking_distance,
+    )
+    from src.wacv.monitoring.metrics import evaluate_ranking
+
+    opts = options or ProtocolEvalOptions()
+    started = time.perf_counter()
+    probabilities = _predict_gallery_probabilities(
+        config=config,
+        model=model,
+        device=device,
+        ground_truth=ground_truth,
+        attribute_names=attribute_names,
+    )
+    if opts.ensemble is not None:
+        weight = float(opts.ensemble.weight)
+        if not 0.0 <= weight <= 1.0:
+            raise ValueError(f"ensemble weight must be in [0, 1], got {weight}")
+        other = _predict_gallery_probabilities(
+            config=opts.ensemble.config,
+            model=opts.ensemble.model,
+            device=device,
+            ground_truth=ground_truth,
+            attribute_names=attribute_names,
+        )
+        if other.shape != probabilities.shape:
+            raise ValueError(
+                f"ensemble probs shape {other.shape} != primary {probabilities.shape}"
+            )
+        probabilities = weight * probabilities + (1.0 - weight) * other
     attributes = ground_truth[list(attribute_names)].to_numpy(dtype=np.int64)
     score_temperature = float(config.ranking.temperature)
     score_probabilities = probabilities
@@ -160,9 +234,9 @@ def _evaluate_protocol(
             probabilities, temperatures
         )
         score_temperature = 1.0
-        if calibration_out is not None:
-            calibration_out.parent.mkdir(parents=True, exist_ok=True)
-            calibration_out.write_text(
+        if opts.calibration_out is not None:
+            opts.calibration_out.parent.mkdir(parents=True, exist_ok=True)
+            opts.calibration_out.write_text(
                 json.dumps(
                     {
                         "mode": "per_attribute",
@@ -177,6 +251,26 @@ def _evaluate_protocol(
     gallery_embeddings = None
     query_embeddings = None
     if distance == "clear_hard":
+        workers = resolve_num_workers(config.data.num_workers)
+        loader = DataLoader(
+            AttributeDataset(
+                ground_truth,
+                config.data.root,
+                transforms_for_model(
+                    config.model.name,
+                    train=False,
+                    image_size=(
+                        int(config.data.image_size[0]),
+                        int(config.data.image_size[1]),
+                    ),
+                ),
+                attribute_names=attribute_names,
+            ),
+            batch_size=config.data.batch_size,
+            num_workers=workers,
+            pin_memory=device.type == "cuda",
+            persistent_workers=workers > 0,
+        )
         gallery_embeddings, query_embeddings = _clear_hard_embeddings(
             model,
             loader,
@@ -242,6 +336,9 @@ def evaluate_checkpoint(
     *,
     protocols: tuple[ProtocolName, ...],
     distance: str | None = None,
+    ensemble_config_path: Path | None = None,
+    ensemble_checkpoint: Path | None = None,
+    ensemble_weight: float = 0.5,
 ) -> tuple[dict[str, dict[str, float]], ExperimentConfig]:
     from src.wacv.checkpoint import load_model_weights
     from src.wacv.config import load_config
@@ -257,6 +354,24 @@ def evaluate_checkpoint(
     model = build_model(inference_model, num_attributes=len(attribute_names)).to(device)
     load_model_weights(checkpoint.resolve(), model, map_location=device)
 
+    ensemble: ProbabilityEnsemble | None = None
+    if ensemble_checkpoint is not None:
+        if ensemble_config_path is None:
+            raise ValueError("--ensemble-checkpoint requires --ensemble-config")
+        ensemble_cfg = load_config(ensemble_config_path)
+        ensemble_inference = ensemble_cfg.model.model_copy(update={"pretrained": False})
+        ensemble_model = build_model(
+            ensemble_inference, num_attributes=len(attribute_names)
+        ).to(device)
+        load_model_weights(
+            ensemble_checkpoint.resolve(), ensemble_model, map_location=device
+        )
+        ensemble = ProbabilityEnsemble(
+            model=ensemble_model,
+            config=ensemble_cfg,
+            weight=ensemble_weight,
+        )
+
     results: dict[str, dict[str, float]] = {}
     run_dir = config.run.output_dir / config.run.name
     for protocol in protocols:
@@ -266,7 +381,7 @@ def evaluate_checkpoint(
             calibration_path = run_dir / f"calibration_{protocol}.json"
             if protocol == "id_val":
                 calibration_path = run_dir / "calibration.json"
-        results[protocol] = _evaluate_protocol(
+        metrics = _evaluate_protocol(
             config=config,
             model=model,
             device=device,
@@ -274,8 +389,15 @@ def evaluate_checkpoint(
             queries=queries,
             attribute_names=names,
             distance=distance_name,
-            calibration_out=calibration_path,
+            options=ProtocolEvalOptions(
+                calibration_out=calibration_path,
+                ensemble=ensemble,
+            ),
         )
+        key = protocol
+        if ensemble is not None:
+            key = f"{protocol}_ensemble"
+        results[key] = metrics
     return results, config
 
 
@@ -310,6 +432,9 @@ def main() -> None:
         checkpoint,
         protocols=protocols,
         distance=args.distance,
+        ensemble_config_path=args.ensemble_config,
+        ensemble_checkpoint=args.ensemble_checkpoint,
+        ensemble_weight=float(args.ensemble_weight),
     )
     serialized = json.dumps(results, indent=2, sort_keys=True) + "\n"
     run_dir = config.run.output_dir / config.run.name
@@ -320,15 +445,16 @@ def main() -> None:
             json.dumps(merged, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
         # Keep legacy single-protocol dump for id_val callers.
-        if "id_val" in results:
+        id_key = "id_val_ensemble" if "id_val_ensemble" in results else "id_val"
+        if id_key in results:
             legacy = {
-                "mADM": results["id_val"]["madm"],
-                "mAP": results["id_val"]["map"],
-                "Rank-1": results["id_val"]["rank1"],
-                "Rank-5": results["id_val"]["rank5"],
-                "Rank-10": results["id_val"]["rank10"],
-                "mINP": results["id_val"]["minp"],
-                "mA": results["id_val"]["ma"],
+                "mADM": results[id_key]["madm"],
+                "mAP": results[id_key]["map"],
+                "Rank-1": results[id_key]["rank1"],
+                "Rank-5": results[id_key]["rank5"],
+                "Rank-10": results[id_key]["rank10"],
+                "mINP": results[id_key]["minp"],
+                "mA": results[id_key]["ma"],
             }
             (run_dir / "evaluation.json").write_text(
                 json.dumps(legacy, indent=2, sort_keys=True) + "\n", encoding="utf-8"
