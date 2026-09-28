@@ -7,17 +7,25 @@ only for reporting/download timing, not for keeping the kernel alive.
 Never clones this private repo from inside the kernel (would need a
 checked-in token) - stages a self-contained folder instead (see
 src/wacv/remote/stage.py).
+
+Kaggle *script* kernels only materialize ``code_file`` under ``/kaggle/src``
+at runtime (sibling folders like ``scripts/`` are not present). The push
+path therefore embeds the staged tree as a base64 zip inside
+``run_remote.py``, extracts it to a writable root, then runs ``run_inner.py``.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import glob
+import io
 import json
 import os
 import shutil
 import subprocess
 import time
+import zipfile
 from pathlib import Path
 from typing import Final
 
@@ -27,6 +35,9 @@ STAGING_DIR: Final[Path] = ROOT / "build" / "remote-kaggle"
 OUTPUT_DIR: Final[Path] = ROOT / "build" / "remote-kaggle-output"
 _TERMINAL_OK: Final[tuple[str, ...]] = ("complete",)
 _TERMINAL_FAIL: Final[tuple[str, ...]] = ("error", "cancel")
+_SKIP_BUNDLE_NAMES: Final[frozenset[str]] = frozenset(
+    {"run_remote.py", "kernel-metadata.json"}
+)
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -51,6 +62,14 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         help="Build the staging folder and exit; no kaggle CLI or credentials needed.",
     )
     parser.set_defaults(func=run)
+
+
+def _cli_env() -> dict[str, str]:
+    """UTF-8 env for the Kaggle CLI (avoids Windows charmap failures on logs)."""
+    env = dict(os.environ)
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
 
 
 def resolve_username(explicit: str | None) -> str:
@@ -87,6 +106,81 @@ def write_kernel_metadata(staging_dir: Path, *, kernel_id: str, title: str) -> N
     )
 
 
+def _zip_staging_payload(staging_dir: Path) -> bytes:
+    """Zip staged pipeline files (everything except the outer entrypoint/metadata)."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in sorted(staging_dir.rglob("*")):
+            if not path.is_file() or path.name in _SKIP_BUNDLE_NAMES:
+                continue
+            archive.write(path, path.relative_to(staging_dir).as_posix())
+    payload = buffer.getvalue()
+    if not payload:
+        raise SystemExit(f"refusing empty Kaggle payload from {staging_dir}")
+    return payload
+
+
+def embed_staging_payload(staging_dir: Path) -> None:
+    """Rewrite ``run_remote.py`` so one uploaded file carries the whole tree.
+
+    Kaggle script kernels only expose ``code_file`` under ``/kaggle/src``;
+    nested staged folders are not available at runtime. Embed them as a
+    base64 zip, extract to a writable root, then execute ``run_inner.py``.
+    """
+    entry = staging_dir / "run_remote.py"
+    if not entry.is_file():
+        raise SystemExit(f"missing staged entrypoint: {entry}")
+
+    inner = staging_dir / "run_inner.py"
+    inner.write_text(entry.read_text(encoding="utf-8"), encoding="utf-8")
+    payload_b64 = base64.b64encode(_zip_staging_payload(staging_dir)).decode("ascii")
+    wrapper = _self_extracting_entrypoint(payload_b64=payload_b64)
+    compile(wrapper, str(entry), "exec")
+    entry.write_text(wrapper, encoding="utf-8")
+    # Outer code_file is the wrapper only; inner lives inside the zip.
+    inner.unlink(missing_ok=True)
+
+
+def _self_extracting_entrypoint(*, payload_b64: str) -> str:
+    """Single-file kernel source: extract zip, then run ``run_inner.py``."""
+    return (
+        '"""Auto-generated Kaggle single-file entrypoint - do not hand-edit.\n\n'
+        "Kaggle script kernels only materialize this file under /kaggle/src.\n"
+        "The staged scripts/src/configs tree is embedded as PAYLOAD_B64 and\n"
+        "extracted before run_inner.py (the normal remote stages) runs.\n"
+        '"""\n\n'
+        "from __future__ import annotations\n\n"
+        "import base64\n"
+        "import io\n"
+        "import os\n"
+        "import subprocess\n"
+        "import sys\n"
+        "import zipfile\n"
+        "from pathlib import Path\n\n"
+        f"PAYLOAD_B64 = {payload_b64!r}\n\n\n"
+        "def _extract_root() -> Path:\n"
+        "    working = Path('/kaggle/working')\n"
+        "    if working.is_dir() and os.access(working, os.W_OK):\n"
+        "        return working\n"
+        "    return Path.cwd()\n\n\n"
+        "def main() -> None:\n"
+        "    root = _extract_root()\n"
+        "    os.chdir(root)\n"
+        "    blob = base64.b64decode(PAYLOAD_B64)\n"
+        "    with zipfile.ZipFile(io.BytesIO(blob)) as archive:\n"
+        "        archive.extractall(root)\n"
+        "    marker = root / 'scripts' / 'download-dataset.py'\n"
+        "    if not marker.is_file():\n"
+        "        raise FileNotFoundError(f'payload extract failed: missing {marker}')\n"
+        "    inner = root / 'run_inner.py'\n"
+        "    if not inner.is_file():\n"
+        "        raise FileNotFoundError(f'payload extract failed: missing {inner}')\n"
+        "    subprocess.run([sys.executable, str(inner)], check=True, cwd=root)\n\n\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n"
+    )
+
+
 def kernel_status(kernel_id: str) -> str | None:
     """The kernel's status text, or None on a transient CLI/network hiccup.
 
@@ -100,6 +194,9 @@ def kernel_status(kernel_id: str) -> str | None:
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=_cli_env(),
         )
     except (subprocess.CalledProcessError, OSError) as exc:
         print(f"transient status check failure, retrying: {exc}")
@@ -147,6 +244,8 @@ def pull_run_into_local(output_dir: Path, run_name: str) -> Path | None:
 def run(args: argparse.Namespace) -> None:
     result = build_staging_dir(args.config, STAGING_DIR)
     print(f"staged {result.staging_dir} (run={result.run_name})")
+    embed_staging_payload(result.staging_dir)
+    print("embedded staged tree into run_remote.py (Kaggle single-file script)")
 
     if args.stage_only:
         return
@@ -175,6 +274,7 @@ def run(args: argparse.Namespace) -> None:
             args.accelerator,
         ],
         check=True,
+        env=_cli_env(),
     )
     print(f"pushed {kernel_id}; polling every {args.poll_interval:.0f}s")
 
@@ -184,10 +284,25 @@ def run(args: argparse.Namespace) -> None:
 
     if OUTPUT_DIR.exists():
         shutil.rmtree(OUTPUT_DIR)
-    subprocess.run(
+    output_result = subprocess.run(
         ["kaggle", "kernels", "output", kernel_id, "-p", str(OUTPUT_DIR), "-o"],
-        check=True,
+        check=False,
+        env=_cli_env(),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
+    if output_result.returncode != 0:
+        if output_result.stdout:
+            print(output_result.stdout)
+        if output_result.stderr:
+            print(output_result.stderr)
+        print(f"kernel page for logs: https://www.kaggle.com/code/{kernel_id}")
+        raise SystemExit(
+            f"kaggle kernels output failed (exit {output_result.returncode}); "
+            f"kernel status was: {final_status}"
+        )
     landed = pull_run_into_local(OUTPUT_DIR, result.run_name)
 
     failed = any(word in final_status.lower() for word in _TERMINAL_FAIL)
