@@ -82,10 +82,14 @@ def build_loaders(
         config.model.name,
         train=config.data.train_augmentation,
         image_size=image_size,
+        degrade_aug=config.data.degrade_aug,
     )
     if not config.data.train_augmentation:
         train_transform = transforms_for_model(
-            config.model.name, train=False, image_size=image_size
+            config.model.name,
+            train=False,
+            image_size=image_size,
+            degrade_aug=config.data.degrade_aug,
         )
     eval_transform = transforms_for_model(
         config.model.name, train=False, image_size=image_size
