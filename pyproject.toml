@@ -59,6 +59,12 @@ venv = ".venv"
 # Must match requires-python, or Black assumes a newer grammar than the
 # interpreter running the safety check can parse.
 target-version = ["py313"]
+# Keep vendored SOLIDER Swin close to upstream formatting.
+force-exclude = '''
+/(
+  solider_backbone\.py
+)/
+'''
 
 # Import sorting is Ruff's `I` rules, not a separate isort pass: the two
 # disagreed on the same file, and one tool owning the rule ends that class of
@@ -77,6 +83,9 @@ pythonpath = ["."]
 [tool.ruff]
 line-length = 88
 target-version = "py313"
+# Upstream SOLIDER Swin (Apache-2.0) kept close to the official file so
+# checkpoint keys stay loadable; style is not ours to rewrite.
+extend-exclude = ["src/wacv/models/solider_backbone.py"]
 
 [tool.ruff.lint]
 # Rules are selected by what they prevent, not by how many they are. The

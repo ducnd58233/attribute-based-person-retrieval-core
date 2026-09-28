@@ -1,0 +1,72 @@
+# E21 / H21: SOLIDER Swin-B pretrain-only (LUPerson SSL) on LODO-M + S*.
+#
+# Provenance (do NOT commit weights):
+# - Official Models table (Swin Base): https://github.com/tinyvision/SOLIDER
+# - Google Drive file id: 1uh7tO34tMf73MJfFqyFEGx42UBktTbZU
+# - View URL: https://drive.google.com/file/d/1uh7tO34tMf73MJfFqyFEGx42UBktTbZU/view?usp=share_link
+# - Expected filename: solider_swin_base.pth
+# - Pretrain-only: LUPerson self-supervised release from the main SOLIDER repo —
+#   NOT any PAR-finetuned checkpoint from SOLIDER-PersonAttributeRecognition.
+# - Semantic weight 0.8 per SOLIDER PAR docs.
+# - Optional: set model.weights_path to a local copy, and/or model.weights_sha256
+#   after first download to pin provenance (upstream does not publish sha256).
+#
+# Recipe otherwise matches ConvNeXt LODO-M control + promoted scorer S*
+# (hybrid α=0.5 + dual-softmax τ=0.05 + TTA).
+
+model:
+  name: solider_swin_b
+  pretrained: true
+  dropout: 0.1
+  # Leave null to download the official Drive release into ~/.cache/wacv/solider/
+  # at train time, or point at a local solider_swin_base.pth:
+  weights_path: null
+  pretrained_url: null
+  weights_sha256: null
+  semantic_weight: 0.8
+
+data:
+  root: data
+  batch_size: 32
+  num_workers: 4
+  limit: null
+  train_augmentation: true
+  train_domains:
+    - PA100k
+    - PETA
+  image_size: [256, 128]
+
+optimization:
+  epochs: 30
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  pos_weight_clip: 10.0
+  amp: true
+  grad_clip_norm: 1.0
+  ema_decay: 0.999
+  scheduler_factor: 0.1
+  scheduler_patience: 3
+  label_smoothing: 0.05
+  early_stop_patience: 4
+
+run:
+  name: e21_solider_swin_b
+  output_dir: runs
+  resume: false
+  seed: 42
+  device: auto
+  progress: true
+
+ranking:
+  distance: hybrid
+  temperature: 1.0
+  alpha: 0.5
+  query_norm: dual_softmax
+  query_norm_tau: 0.05
+
+inference:
+  tta:
+    - identity
+    - hflip
+    - scale_crop
+  tta_scale: 1.15

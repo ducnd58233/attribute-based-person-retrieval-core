@@ -6,6 +6,7 @@ from src.wacv.config import ModelConfig
 from src.wacv.models.clip import build_clip_attribute_classifier, build_clip_vit_l14
 from src.wacv.models.convnext import build_convnext
 from src.wacv.models.resnet import build_resnet50
+from src.wacv.models.solider import build_solider_swin_b
 from src.wacv.query_adapter import attach_hard_query_adapter
 
 
@@ -35,6 +36,10 @@ def build_model(config: ModelConfig, *, num_attributes: int) -> nn.Module:
         )
         # LoRA path always keeps the base tower frozen.
         backbone.freeze_backbone()
+    elif config.name == "solider_swin_b":
+        backbone = build_solider_swin_b(config, num_attributes=num_attributes)
+        if config.freeze_backbone:
+            backbone.freeze_backbone()
     else:
         backbone = build_convnext(
             config.name,

@@ -266,6 +266,9 @@ $RECYCLE.BIN/
 
 # Local experiment artifacts and checkpoints
 /runs/
+# Downloaded foundation-model pretrains (SOLIDER / etc.) — never commit
+/pretrained/
+**/solider_swin_base.pth
 
 # Generated Colab / notebook exports (on-demand only; re-run exporter)
 notebooks/*.ipynb

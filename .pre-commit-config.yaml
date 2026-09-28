@@ -6,12 +6,15 @@ repos:
         entry: uv run ruff check --fix
         language: system
         types: [python]
+        # Upstream SOLIDER Swin kept close to the official file for key layout.
+        exclude: solider_backbone\.py$
 
       - id: black
         name: black
         entry: uv run black
         language: system
         types: [python]
+        exclude: solider_backbone\.py$
 
       # absolufy-imports (pyproject.toml dev group) and a function-length
       # guard are worth adding once src/ exists and has a shape worth

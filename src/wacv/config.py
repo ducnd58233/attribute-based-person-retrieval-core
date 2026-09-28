@@ -15,6 +15,7 @@ ModelName = Literal[
     "convnext_base",
     "clip_vit_b16",
     "clip_vit_l14",
+    "solider_swin_b",
 ]
 DeviceName = Literal["auto", "cpu", "cuda", "tpu"]
 DistanceName = Literal[
@@ -82,6 +83,33 @@ class ModelConfig(StrictConfig):
         description="If >0, inject LoRA on CLIP attention out_proj (PEFT).",
     )
     lora_alpha: PositiveFloat = 16.0
+    weights_path: ConfigPath | None = Field(
+        default=None,
+        description=(
+            "Optional local backbone checkpoint (e.g. SOLIDER solider_swin_base.pth). "
+            "When set, skip download and load this file instead."
+        ),
+    )
+    pretrained_url: str | None = Field(
+        default=None,
+        description=(
+            "Optional download URL / Google Drive id for backbone weights when "
+            "pretrained=true and weights_path is unset (SOLIDER Swin-B default)."
+        ),
+    )
+    weights_sha256: str | None = Field(
+        default=None,
+        description=(
+            "Optional hex digest of the backbone checkpoint. When set, load/download "
+            "verifies the file before use (provenance guard)."
+        ),
+    )
+    semantic_weight: float = Field(
+        default=0.8,
+        ge=0.0,
+        le=1.0,
+        description="SOLIDER semantic controller weight (PAR docs use 0.8).",
+    )
 
 
 class DataConfig(StrictConfig):
@@ -227,6 +255,9 @@ def load_config(path: Path, *, project_root: Path | None = None) -> ExperimentCo
     )
 
     data = config.data.model_copy(update={"root": _resolve(config.data.root, root)})
+    model = config.model.model_copy(
+        update={"weights_path": _resolve(config.model.weights_path, root)}
+    )
     output_dir = _resolve(config.run.output_dir, root)
     if output_dir is None:
         raise ValueError("run.output_dir resolved to None")
@@ -239,4 +270,4 @@ def load_config(path: Path, *, project_root: Path | None = None) -> ExperimentCo
             "init_weights": _resolve(config.run.init_weights, root),
         }
     )
-    return config.model_copy(update={"data": data, "run": run})
+    return config.model_copy(update={"model": model, "data": data, "run": run})
