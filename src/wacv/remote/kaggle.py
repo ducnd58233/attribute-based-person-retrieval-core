@@ -238,6 +238,8 @@ def pull_run_into_local(output_dir: Path, run_name: str) -> Path | None:
 def run(args: argparse.Namespace) -> None:
     result = build_staging_dir(args.config, STAGING_DIR)
     print(f"staged {result.staging_dir} (run={result.run_name})")
+    embed_staging_payload(result.staging_dir)
+    print("embedded staged tree into run_remote.py (Kaggle single-file script)")
 
     if args.stage_only:
         return
@@ -251,15 +253,12 @@ def run(args: argparse.Namespace) -> None:
     username = resolve_username(args.kaggle_username)
     kernel_slug = result.run_name.replace("_", "-").lower()
     kernel_id = f"{username}/{kernel_slug}"
-    # Metadata must exist before push; write it before rewriting the entrypoint.
     write_kernel_metadata(
         result.staging_dir, kernel_id=kernel_id, title=result.run_name
     )
-    embed_staging_payload(result.staging_dir)
-    print("embedded staged tree into run_remote.py (Kaggle single-file script)")
     meta = result.staging_dir / "kernel-metadata.json"
     if not meta.is_file():
-        raise SystemExit(f"missing {meta} after embed; refusing to push")
+        raise SystemExit(f"missing {meta} after write; refusing to push")
 
     subprocess.run(
         [
