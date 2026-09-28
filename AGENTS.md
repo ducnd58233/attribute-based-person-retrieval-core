@@ -114,6 +114,25 @@ here.
   acceptance criteria require. Prefer a script under `scripts/` over new
   packages, fixtures, or README sections. Delete scaffolding that is not
   needed for train / evaluate / package / submit.
+- **A well-known problem gets a well-known, uv-installable, cross-platform
+  (Windows + Linux) library before it gets a hand-rolled reimplementation
+  (MUST):** `src/wacv/remote/env.py`'s `load_dotenv` used to be a from-scratch
+  `KEY=VALUE` parser with a comment justifying it ("not python-dotenv...
+  not worth a dependency for") - that judgment call is reversed now:
+  `python-dotenv` is official, pure Python (installs identically on
+  Windows and Linux via `uv`, no compiled extension), and its own
+  `override=False` already gets the "real env var wins" behavior right,
+  so the hand-rolled parser bought nothing except a second copy of logic
+  to maintain and its own edge cases (quoting, comments, blank lines) to
+  keep in sync with the real spec. Reach for the real library first;
+  reimplement only when nothing free-and-installable actually covers the
+  need. This is a case-by-case judgment, not a blanket "always add a
+  dependency": `src/wacv/remote/kaggle.py`'s `wait_for_terminal_status`
+  open-ended poll-until-terminal-or-timeout loop stays hand-rolled on
+  purpose - it is domain logic (when is this specific Kaggle kernel
+  actually done), not a generic single-call retry a library like
+  `tenacity` is built for, and reaching for one there would add a
+  dependency for something already minimal and correct.
 - **Grep the whole repo before deleting a function or class as dead
   (MUST):** "looks unused in this file" is not evidence. Search every
   `src/`, `scripts/`, `tests/`, and `submission/` file for the exact name

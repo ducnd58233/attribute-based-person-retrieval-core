@@ -30,6 +30,7 @@ dev = [
     "packaging>=24.0",
     "pre-commit>=4.6.2",
     "pyright>=1.1.414",
+    "python-dotenv>=1.2.1",
     "pytest>=8.4.0",
     "ruff>=0.16.8",
 ]
