@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 
 import yaml
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PositiveFloat
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    PositiveFloat,
+    model_validator,
+)
 from pydantic.types import NonNegativeInt, PositiveInt
 
 ModelName = Literal[
@@ -47,6 +54,19 @@ ImageSize = Annotated[
 ]
 
 
+def _pair_from_yaml(value: object) -> object:
+    """Accept YAML length-2 lists as pairs."""
+    if isinstance(value, list) and len(value) == 2:
+        return (value[0], value[1])
+    return value
+
+
+FloatPair = Annotated[tuple[float, float], BeforeValidator(_pair_from_yaml)]
+JpegQualityRange = Annotated[
+    tuple[PositiveInt, PositiveInt], BeforeValidator(_pair_from_yaml)
+]
+
+
 def _resume_from_yaml(value: object) -> object:
     """Accept null/false (off), true (auto last.pt), or a path string."""
     if value is True:
@@ -84,6 +104,28 @@ class ModelConfig(StrictConfig):
     lora_alpha: PositiveFloat = 16.0
 
 
+class DegradeAugConfig(StrictConfig):
+    """CCTV-style train-time degradations (no hue jitter; colour is labelled)."""
+
+    enabled: bool = False
+    downscale: FloatPair = (0.3, 1.0)
+    blur_p: float = Field(default=0.3, ge=0.0, le=1.0)
+    jpeg: JpegQualityRange = (30, 90)
+
+    @model_validator(mode="after")
+    def _check_ranges(self) -> Self:
+        scale_lo, scale_hi = self.downscale
+        if not (0.0 < scale_lo <= scale_hi <= 1.0):
+            raise ValueError(
+                "degrade_aug.downscale must satisfy 0 < min <= max <= 1, "
+                f"got {self.downscale}"
+            )
+        jpeg_lo, jpeg_hi = self.jpeg
+        if jpeg_lo > jpeg_hi:
+            raise ValueError(f"degrade_aug.jpeg min must be <= max, got {self.jpeg}")
+        return self
+
+
 class DataConfig(StrictConfig):
     root: ConfigPath = Path("data")
     batch_size: PositiveInt = 32
@@ -93,6 +135,7 @@ class DataConfig(StrictConfig):
     train_domains: list[DomainName] | None = None
     eval_domains: list[DomainName] | None = None
     image_size: ImageSize = (256, 128)
+    degrade_aug: DegradeAugConfig = Field(default_factory=DegradeAugConfig)
 
 
 class OptimizationConfig(StrictConfig):

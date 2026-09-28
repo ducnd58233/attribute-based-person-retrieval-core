@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import random
 from collections.abc import Sequence
+from io import BytesIO
 from pathlib import Path
 
 import numpy as np
@@ -13,6 +15,7 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 
 from src.wacv.attributes import attribute_names_from_columns
+from src.wacv.config import DegradeAugConfig
 
 KNOWN_DOMAINS: tuple[str, ...] = ("PA100k", "PETA", "Market1501")
 DEFAULT_IMAGE_SIZE: tuple[int, int] = (256, 128)
@@ -22,6 +25,56 @@ _CLIP_MEAN = [0.48145466, 0.4578275, 0.40821073]
 _CLIP_STD = [0.26862954, 0.26130258, 0.27577711]
 _IMAGENET_MEAN = [0.485, 0.456, 0.406]
 _IMAGENET_STD = [0.229, 0.224, 0.225]
+
+
+class RandomDownscaleUpsample:
+    """Randomly shrink then restore spatial size (simulates low-res CCTV)."""
+
+    def __init__(
+        self,
+        scale_min: float,
+        scale_max: float,
+    ) -> None:
+        self._scale_min = scale_min
+        self._scale_max = scale_max
+
+    def __call__(self, image: Image.Image) -> Image.Image:
+        scale = random.uniform(self._scale_min, self._scale_max)
+        width, height = image.size
+        small_w = max(1, int(width * scale))
+        small_h = max(1, int(height * scale))
+        reduced = image.resize((small_w, small_h), Image.BILINEAR)
+        return reduced.resize((width, height), Image.BILINEAR)
+
+
+class RandomJpegCompression:
+    """Re-encode through JPEG at a random quality (simulates compression artifacts)."""
+
+    def __init__(self, quality_min: int, quality_max: int) -> None:
+        self._quality_min = quality_min
+        self._quality_max = quality_max
+
+    def __call__(self, image: Image.Image) -> Image.Image:
+        quality = random.randint(self._quality_min, self._quality_max)
+        buffer = BytesIO()
+        image.save(buffer, format="JPEG", quality=quality)
+        buffer.seek(0)
+        return Image.open(buffer).convert("RGB")
+
+
+def color_jitter_hue_span(
+    pipeline: transforms.Compose,
+) -> tuple[float, float] | None:
+    """Return the (min, max) hue jitter factors in ``pipeline``, if any."""
+    for step in pipeline.transforms:
+        if isinstance(step, transforms.ColorJitter):
+            hue = step.hue
+            if hue is None:
+                return (0.0, 0.0)
+            if isinstance(hue, (list, tuple)) and len(hue) == 2:
+                return (float(hue[0]), float(hue[1]))
+            return (float(hue), float(hue))
+    return None
 
 
 def _eval_transform(
@@ -52,6 +105,39 @@ def _train_transform(
     )
 
 
+def _train_transform_degrade(
+    size: tuple[int, int],
+    degrade: DegradeAugConfig,
+    *,
+    mean: list[float],
+    std: list[float],
+) -> transforms.Compose:
+    scale_lo, scale_hi = degrade.downscale
+    jpeg_lo, jpeg_hi = degrade.jpeg
+    return transforms.Compose(
+        [
+            transforms.Resize(size),
+            RandomDownscaleUpsample(scale_lo, scale_hi),
+            transforms.RandomApply(
+                [transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0))],
+                p=degrade.blur_p,
+            ),
+            RandomJpegCompression(jpeg_lo, jpeg_hi),
+            transforms.AugMix(),
+            transforms.RandomHorizontalFlip(),
+            transforms.ColorJitter(
+                brightness=0.2,
+                contrast=0.2,
+                saturation=0.2,
+                hue=0.0,
+            ),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=mean, std=std),
+            transforms.RandomErasing(p=0.25),
+        ]
+    )
+
+
 IMAGE_TRANSFORM = _eval_transform(
     DEFAULT_IMAGE_SIZE, mean=_IMAGENET_MEAN, std=_IMAGENET_STD
 )
@@ -71,14 +157,24 @@ def transforms_for_model(
     *,
     train: bool,
     image_size: tuple[int, int] = DEFAULT_IMAGE_SIZE,
+    degrade_aug: DegradeAugConfig | None = None,
 ) -> transforms.Compose:
     """Pick ImageNet or CLIP preprocessing at ``image_size`` (H, W)."""
     size = (int(image_size[0]), int(image_size[1]))
+    use_degrade = train and degrade_aug is not None and degrade_aug.enabled
     if model_name.startswith("clip_"):
         if train:
+            if use_degrade:
+                return _train_transform_degrade(
+                    size, degrade_aug, mean=_CLIP_MEAN, std=_CLIP_STD
+                )
             return _train_transform(size, mean=_CLIP_MEAN, std=_CLIP_STD)
         return _eval_transform(size, mean=_CLIP_MEAN, std=_CLIP_STD)
     if train:
+        if use_degrade:
+            return _train_transform_degrade(
+                size, degrade_aug, mean=_IMAGENET_MEAN, std=_IMAGENET_STD
+            )
         return _train_transform(size, mean=_IMAGENET_MEAN, std=_IMAGENET_STD)
     return _eval_transform(size, mean=_IMAGENET_MEAN, std=_IMAGENET_STD)
 
