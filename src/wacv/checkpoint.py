@@ -22,6 +22,7 @@ class ResumeState:
     next_epoch: int
     global_step: int
     best_metric: float
+    swad: dict[str, object] | None = None
 
 
 def _capture_rng_state() -> dict[str, object]:
@@ -79,9 +80,15 @@ class CheckpointManager:
         self._config = config
 
     def save(
-        self, path: Path, *, epoch: int, global_step: int, best_metric: float
+        self,
+        path: Path,
+        *,
+        epoch: int,
+        global_step: int,
+        best_metric: float,
+        swad: dict[str, bool | int | float] | None = None,
     ) -> None:
-        payload = {
+        payload: dict[str, object] = {
             "model": self._model.state_dict(),
             "optimizer": self._optimizer.state_dict(),
             "scheduler": self._scheduler.state_dict(),
@@ -93,6 +100,8 @@ class CheckpointManager:
             "rng_state": _capture_rng_state(),
             "config": self._config.model_dump(mode="json"),
         }
+        if swad is not None:
+            payload["swad"] = swad
         temporary_path = path.with_suffix(f"{path.suffix}.tmp")
         torch.save(payload, temporary_path)
         temporary_path.replace(path)
@@ -108,10 +117,13 @@ class CheckpointManager:
         self._scaler.load_state_dict(checkpoint["scaler"])
         self._ema_model.load_state_dict(checkpoint["ema_model"])
         _restore_rng_state(checkpoint["rng_state"])
+        swad_raw = checkpoint.get("swad")
+        swad_state = cast(dict[str, object], swad_raw) if swad_raw is not None else None
         return ResumeState(
             next_epoch=int(checkpoint["epoch"]) + 1,
             global_step=int(checkpoint["global_step"]),
             best_metric=float(checkpoint["best_metric"]),
+            swad=swad_state,
         )
 
 

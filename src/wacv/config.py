@@ -26,6 +26,7 @@ QueryNorm = Literal["none", "dual_softmax"]
 TTAView = Literal["identity", "hflip", "scale_crop"]
 DomainName = Literal["PA100k", "PETA", "Market1501"]
 EvalProtocol = Literal["id_val", "lodo_m"]
+WeightAvgMode = Literal["ema", "swad"]
 
 
 def _path_from_yaml(value: object) -> object:
@@ -95,6 +96,20 @@ class DataConfig(StrictConfig):
     image_size: ImageSize = (256, 128)
 
 
+class SwadConfig(StrictConfig):
+    """Dense weight averaging while ID-val loss stays near its running minimum."""
+
+    plateau_patience: NonNegativeInt | None = Field(
+        default=None,
+        description="Epochs without val-loss improvement before averaging starts; "
+        "defaults to optimization.scheduler_patience when null.",
+    )
+    loss_tolerance: PositiveFloat = Field(
+        default=0.01,
+        description="Stop averaging when val loss exceeds min-in-window plus this.",
+    )
+
+
 class OptimizationConfig(StrictConfig):
     epochs: PositiveInt = 20
     learning_rate: PositiveFloat = 1e-4
@@ -102,7 +117,9 @@ class OptimizationConfig(StrictConfig):
     pos_weight_clip: PositiveFloat = 10.0
     amp: bool = True
     grad_clip_norm: PositiveFloat | None = 1.0
+    weight_avg: WeightAvgMode = "ema"
     ema_decay: float = Field(default=0.999, gt=0.0, lt=1.0)
+    swad: SwadConfig = Field(default_factory=SwadConfig)
     scheduler_factor: float = Field(default=0.1, gt=0.0, lt=1.0)
     scheduler_patience: NonNegativeInt = 3
     label_smoothing: float = Field(default=0.0, ge=0.0, lt=0.5)

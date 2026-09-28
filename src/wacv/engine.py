@@ -14,16 +14,17 @@ import torch
 from torch import nn
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
+from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn, update_bn
 from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
 from src.wacv.checkpoint import CheckpointManager
-from src.wacv.config import DeviceName, ExperimentConfig
+from src.wacv.config import DeviceName, ExperimentConfig, WeightAvgMode
 from src.wacv.evaluation import compute_ranking_metrics
 from src.wacv.losses import hard_query_infonce
 from src.wacv.monitoring.tracking import RunTracker
 from src.wacv.query_adapter import AttributeModelWithHardQuery
+from src.wacv.swad import SwadController
 
 BatchIterable = Iterable[tuple[torch.Tensor, torch.Tensor]]
 
@@ -101,10 +102,19 @@ class Trainer:
         self.config = config
         amp_enabled = config.optimization.amp and device.type == "cuda"
         self.scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
-        self.ema_model = AveragedModel(
-            model,
-            multi_avg_fn=get_ema_multi_avg_fn(config.optimization.ema_decay),
-            use_buffers=True,
+        self._weight_avg: WeightAvgMode = config.optimization.weight_avg
+        avg_kwargs: dict[str, object] = {"use_buffers": True}
+        if self._weight_avg == "ema":
+            avg_kwargs["multi_avg_fn"] = get_ema_multi_avg_fn(
+                config.optimization.ema_decay
+            )
+        self.ema_model = AveragedModel(model, **avg_kwargs)
+        plateau_patience = config.optimization.swad.plateau_patience
+        if plateau_patience is None:
+            plateau_patience = config.optimization.scheduler_patience
+        self._swad = SwadController(
+            plateau_patience=plateau_patience,
+            loss_tolerance=config.optimization.swad.loss_tolerance,
         )
         self.checkpoints = CheckpointManager(
             model, optimizer, scheduler, self.scaler, self.ema_model, config
@@ -143,13 +153,22 @@ class Trainer:
         if self.device.type == "xla":
             xm = importlib.import_module("torch_xla.core.xla_model")
             xm.optimizer_step(self.optimizer)
-            self.ema_model.update_parameters(self.model)
+            self._maybe_update_averaged_model()
             return
         scale_before = self.scaler.get_scale()
         self.scaler.step(self.optimizer)
         self.scaler.update()
         if self.scaler.get_scale() >= scale_before:
+            self._maybe_update_averaged_model()
+
+    def _maybe_update_averaged_model(self) -> None:
+        if self._weight_avg == "swad":
+            if not self._swad.should_average():
+                return
             self.ema_model.update_parameters(self.model)
+            self._swad.mark_averaged()
+            return
+        self.ema_model.update_parameters(self.model)
 
     def _train_epoch(self, loader: BatchIterable, epoch: int) -> tuple[float, int]:
         self.model.train()
@@ -254,24 +273,41 @@ class Trainer:
         selection_metric = ranking_metrics.get("mADM", ranking_metrics["mAP"])
         return metrics, postfix, selection_metric
 
-    def fit(
-        self,
-        train_loader: BatchIterable,
-        val_loader: BatchIterable,
-        *,
-        ranking: RankingEvalData | None = None,
-    ) -> FitResult:
+    def _log_swad_val_loss(self, val_loss: float) -> None:
+        was_active = self._swad.active
+        was_stopped = self._swad.stopped
+        self._swad.observe_val_loss(val_loss)
+        if self._swad.active and not was_active:
+            self.tracker.logger.info(
+                "SWAD averaging started val_loss=%.6f plateau_patience=%d",
+                val_loss,
+                self._swad.plateau_patience,
+            )
+        if self._swad.stopped and not was_stopped:
+            self.tracker.logger.info(
+                "SWAD averaging stopped val_loss=%.6f tolerance=%.6f",
+                val_loss,
+                self._swad.loss_tolerance,
+            )
+
+    def _resume_training_state(
+        self, select_higher_is_better: bool
+    ) -> tuple[int, int, float]:
         start_epoch = 0
         global_step = 0
-        select_higher_is_better = ranking is not None
         best_metric = float("-inf") if select_higher_is_better else float("inf")
-        epochs_without_improvement = 0
         resume_path = self.config.run.resume
         if isinstance(resume_path, Path) and resume_path.is_file():
             state = self.checkpoints.load(resume_path, map_location=self.device)
             start_epoch = state.next_epoch
             global_step = state.global_step
             best_metric = state.best_metric
+            if state.swad is not None:
+                self._swad = SwadController.from_state_dict(
+                    state.swad,
+                    plateau_patience=self._swad.plateau_patience,
+                    loss_tolerance=self._swad.loss_tolerance,
+                )
             self.tracker.logger.info(
                 "resumed checkpoint=%s next_epoch=%d global_step=%d",
                 resume_path,
@@ -283,6 +319,20 @@ class Trainer:
                 "resume path missing (%s); starting from epoch 0",
                 resume_path,
             )
+        return start_epoch, global_step, best_metric
+
+    def fit(
+        self,
+        train_loader: BatchIterable,
+        val_loader: BatchIterable,
+        *,
+        ranking: RankingEvalData | None = None,
+    ) -> FitResult:
+        select_higher_is_better = ranking is not None
+        start_epoch, global_step, best_metric = self._resume_training_state(
+            select_higher_is_better
+        )
+        epochs_without_improvement = 0
 
         end_epoch = start_epoch - 1
         epoch_bar = tqdm(
@@ -296,6 +346,8 @@ class Trainer:
                 train_loss, step_delta = self._train_epoch(train_loader, epoch)
                 global_step += step_delta
                 val_loss = self._validate_epoch(val_loader, epoch)
+                if self._weight_avg == "swad":
+                    self._log_swad_val_loss(val_loss)
                 self.scheduler.step(val_loss)
                 metrics, postfix, selection_metric = self._epoch_metrics(
                     train_loss, val_loss, ranking
@@ -308,11 +360,15 @@ class Trainer:
                 )
                 epoch_bar.set_postfix(ordered_dict=dict(postfix))
                 self.tracker.log_metrics(epoch, metrics)
+                swad_state = (
+                    self._swad.to_state_dict() if self._weight_avg == "swad" else None
+                )
                 self.checkpoints.save(
                     self.tracker.checkpoint_dir / "last.pt",
                     epoch=epoch,
                     global_step=global_step,
                     best_metric=best_metric,
+                    swad=swad_state,
                 )
                 if improved:
                     self.checkpoints.save(
@@ -320,6 +376,7 @@ class Trainer:
                         epoch=epoch,
                         global_step=global_step,
                         best_metric=best_metric,
+                        swad=swad_state,
                     )
                 end_epoch = epoch
 
@@ -329,5 +386,9 @@ class Trainer:
                         "early stopping: no improvement for %d epoch(s)", patience
                     )
                     break
+
+        if self._weight_avg == "swad" and self._swad.ever_averaged:
+            self.tracker.logger.info("SWAD update_bn on training data")
+            update_bn(train_loader, self.ema_model, device=self.device)
 
         return FitResult(start_epoch, end_epoch, global_step, best_metric)
