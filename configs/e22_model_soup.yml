@@ -1,0 +1,81 @@
+# E22 greedy model soup (H22 / Wortsman ICML 2022).
+#
+# This YAML is for evaluating or packaging a souped checkpoint — not for
+# training. Ingredients are future full-data runs of the best architecture
+# that share initialisation (seeds / promoted recipe variants). Fill them
+# after those runs exist; E14 does not need to be merged for this script.
+#
+# Build the soup:
+#
+#   uv run python scripts/soup.py \
+#     --mode greedy \
+#     --checkpoints \
+#       runs/<ing0>/checkpoints/best.pt \
+#       runs/<ing1>/checkpoints/best.pt \
+#       runs/<ing2>/checkpoints/best.pt \
+#     --metrics runs/e22_model_soup/ingredient_metrics.json \
+#     --config configs/e22_model_soup.yml \
+#     --out runs/e22_model_soup/checkpoints/soup.pt
+#
+# ingredient_metrics.json maps each checkpoint path (or basename) to its
+# ID-val mADM so greedy search tries stronger members first. Uniform soup
+# skips --metrics / live scoring:
+#
+#   uv run python scripts/soup.py --mode uniform \
+#     --checkpoints ... --out runs/e22_model_soup/checkpoints/soup_uniform.pt
+#
+# Then evaluate the soup like any other checkpoint:
+#
+#   uv run python scripts/evaluate.py \
+#     --config configs/e22_model_soup.yml \
+#     --checkpoint runs/e22_model_soup/checkpoints/soup.pt
+#
+# Placeholder ingredients (replace when ready):
+#   - runs/<best_arch>_seed0/checkpoints/best.pt
+#   - runs/<best_arch>_seed1/checkpoints/best.pt
+#   - runs/<best_arch>_seed2/checkpoints/best.pt
+
+model:
+  name: convnext_base
+  pretrained: true
+  dropout: 0.1
+
+data:
+  root: data
+  batch_size: 32
+  num_workers: 4
+  limit: null
+  train_augmentation: true
+
+optimization:
+  epochs: 1
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  pos_weight_clip: 10.0
+  amp: true
+  grad_clip_norm: 1.0
+  ema_decay: 0.999
+  scheduler_factor: 0.1
+  scheduler_patience: 3
+  label_smoothing: 0.05
+  early_stop_patience: 1
+
+run:
+  name: e22_model_soup
+  output_dir: runs
+  resume: false
+  seed: 42
+  device: auto
+  progress: true
+
+ranking:
+  distance: hybrid
+  temperature: 1.0
+  alpha: 0.5
+
+inference:
+  tta:
+    - identity
+    - hflip
+    - scale_crop
+  tta_scale: 1.15
