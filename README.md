@@ -173,7 +173,7 @@ google-colab-cli`; run it from WSL2 on Windows). See `AGENTS.md` "Remote GPU
 training" for the full walkthrough and the credential/security rules.
 
 ```sh
-cp .env.example .env   # fill in KAGGLE_USERNAME / KAGGLE_KEY, never commit
+cp .env.example .env   # fill in KAGGLE_USERNAME / KAGGLE_API_TOKEN, never commit
 uv run python scripts/remote-training.py kaggle --config configs/convnext_baseline.yml
 uv run python scripts/remote-training.py colab  --config configs/convnext_baseline.yml --gpu T4
 ```
@@ -186,7 +186,7 @@ uv run python scripts/remote-training.py colab  --config configs/convnext_baseli
 | `kaggle`-only argument | Required | Default | Description |
 |---|---|---|---|
 | `--accelerator` | no | `NvidiaTeslaT4` | Kaggle GPU/TPU accelerator id. |
-| `--kaggle-username` | no | from `.env` or the home-directory *~/.kaggle/kaggle.json* | Overrides the resolved Kaggle username. |
+| `--kaggle-username` | no | from `KAGGLE_USERNAME` in `.env` | Overrides the resolved Kaggle username. |
 | `--poll-interval` | no | `60` | Seconds between `kaggle kernels status` checks. |
 | `--timeout-hours` | no | unlimited | Give up *polling* after this long; the kernel itself keeps running on Kaggle regardless. |
 
@@ -197,11 +197,10 @@ uv run python scripts/remote-training.py colab  --config configs/convnext_baseli
 
 #### Credentials (one-time setup)
 
-**Kaggle:** go to https://www.kaggle.com/settings → "Create New Token" →
-downloads `kaggle.json` with your `username` and `key`. Either paste both
-into `.env` as `KAGGLE_USERNAME` / `KAGGLE_KEY`, or drop the file at
-*~/.kaggle/kaggle.json* (the CLI's own default location) — `.env` is
-enough on its own, the file is only a fallback.
+**Kaggle:** go to https://www.kaggle.com/settings/api → "Create New Token",
+then set `KAGGLE_USERNAME` and `KAGGLE_API_TOKEN` in `.env` (see
+`.env.example`). That is the only supported credential path for
+`remote-training.py kaggle`.
 
 **Colab:** run once, on any machine with a browser (does not have to be
 the machine that will run `remote-training.py`):
