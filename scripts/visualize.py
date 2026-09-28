@@ -61,12 +61,14 @@ def main() -> None:
     from src.wacv.data import AttributeDataset, load_gt
     from src.wacv.engine import resolve_device
     from src.wacv.models import build_model
+    from src.wacv.utils import configure_default_logging
     from src.wacv.visualize import (
         collect_comparisons,
         plot_comparisons,
         print_comparison_summary,
     )
 
+    configure_default_logging()
     args = parse_args()
     config = load_config(args.config)
     device = resolve_device(config.run.device)

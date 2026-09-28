@@ -13,7 +13,9 @@ if str(ROOT) not in sys.path:
 
 def main() -> None:
     from scripts.evaluate import evaluate_checkpoint
+    from src.wacv.utils import configure_default_logging
 
+    configure_default_logging()
     config = ROOT / "configs" / "e18_wise_ft.yml"
     out_dir = ROOT / "runs" / "e18_wise_ft" / "checkpoints"
     run_dir = ROOT / "runs" / "e18_wise_ft"

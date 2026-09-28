@@ -43,8 +43,10 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     from src.wacv.attributes import attribute_names_from_gt
     from src.wacv.config import load_config
+    from src.wacv.utils import configure_default_logging
     from src.wacv.wise_ft import write_wise_ft_checkpoint
 
+    configure_default_logging()
     args = parse_args()
     config = load_config(args.config)
     gt_path = Path(config.data.root) / "annotations" / "task2" / "val" / "gt.csv"
