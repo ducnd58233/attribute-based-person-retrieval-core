@@ -136,9 +136,10 @@ class Trainer:
         query_ids = batch_query_ids[valid]
         train_queries = self._asmr_context.train_query_vectors
         unique_ids, inverse = torch.unique(query_ids, sorted=True, return_inverse=True)
-        query_bits = train_queries.index_select(0, unique_ids).to(
-            device=images.device, dtype=torch.float32
-        )
+        # train_query_vectors stay on CPU; index_select requires matching devices.
+        query_bits = train_queries.index_select(
+            0, unique_ids.to(device=train_queries.device)
+        ).to(device=images.device, dtype=torch.float32)
         adapter = root.hard_query_adapter
         margins = adapter.semantic_margin_matrix(query_bits)
         gallery_emb = root.gallery_embeddings(images)
