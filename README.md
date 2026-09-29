@@ -232,5 +232,14 @@ uv run python scripts/remote-training.py colab  --config configs/smoke.yml --sta
 docker compose -f deployments/docker/docker-compose.yml run --rm submission-test
 ```
 
+`load_model` only. For a Codabench-shaped `rank_gallery` smoke (any package —
+ConvNeXt / CLIP / LoRA), point `SUBMISSION_DIR` / `DATA_DIR` at the folder you
+are about to zip and the local data root, then:
+
+```sh
+HARNESS_N_GALLERY=2048 HARNESS_N_QUERIES=512 \
+  docker compose -f deployments/docker/docker-compose.yml run --rm submission-rank-smoke
+```
+
 See `deployments/docker/docker-compose.yml` for how to point it at the
 submission folder you're about to zip.

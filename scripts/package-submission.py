@@ -46,6 +46,17 @@ def parse_args() -> argparse.Namespace:
         default=ROOT / "submission",
         help="Tracked run.py + metadata.yaml template",
     )
+    parser.add_argument(
+        "--tta",
+        nargs="+",
+        default=None,
+        metavar="VIEW",
+        help=(
+            "Override inference TTA views written into model_card.json "
+            "(e.g. identity, or identity hflip). Default: keep config values. "
+            "Use a shorter list when packaging for Codabench's 1-hour wall clock."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -157,6 +168,11 @@ def main() -> None:
     if calib_candidate.is_file():
         shutil.copy2(calib_candidate, assets / "calibration.json")
         card["ranking_calibration"] = "per_attribute"
+    if args.tta is not None:
+        views = [str(view) for view in args.tta]
+        if not views:
+            raise ValueError("--tta requires at least one view name")
+        card["inference_tta"] = views
     (assets / "model_card.json").write_text(
         json.dumps(card, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
