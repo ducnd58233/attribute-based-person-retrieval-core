@@ -170,6 +170,18 @@ class Trainer:
             return
         self.ema_model.update_parameters(self.model)
 
+    def _inference_model(self) -> nn.Module:
+        """Model used for val loss / ranking.
+
+        Before the SWAD window opens, ``ema_model`` is still the init snapshot
+        (dense averaging has not started). Validate the live ``model`` so
+        plateau detection and early stopping see real progress. Once averaging
+        has started (or finished), use the averaged weights.
+        """
+        if self._weight_avg == "swad" and not self._swad.ever_averaged:
+            return self.model
+        return self.ema_model
+
     def _train_epoch(self, loader: BatchIterable, epoch: int) -> tuple[float, int]:
         self.model.train()
         total_loss = 0.0
@@ -200,7 +212,9 @@ class Trainer:
         return total_loss / total_samples, global_step_delta
 
     def _validate_epoch(self, loader: BatchIterable, epoch: int) -> float:
-        self.ema_model.eval()
+        eval_model = self._inference_model()
+        was_training = eval_model.training
+        eval_model.eval()
         total_loss = 0.0
         total_samples = 0
         batches = tqdm(
@@ -211,22 +225,26 @@ class Trainer:
         )
         use_amp = self.scaler.is_enabled()
         autocast_type = "cuda" if use_amp else "cpu"
-        with torch.inference_mode():
-            for images, targets in batches:
-                batch_images = images.to(self.device, non_blocking=True)
-                batch_targets = targets.to(self.device, non_blocking=True)
-                with torch.autocast(device_type=autocast_type, enabled=use_amp):
-                    loss = self.criterion(self.ema_model(batch_images), batch_targets)
-                batch_size = batch_targets.shape[0]
-                total_loss += loss.item() * batch_size
-                total_samples += batch_size
+        try:
+            with torch.inference_mode():
+                for images, targets in batches:
+                    batch_images = images.to(self.device, non_blocking=True)
+                    batch_targets = targets.to(self.device, non_blocking=True)
+                    with torch.autocast(device_type=autocast_type, enabled=use_amp):
+                        loss = self.criterion(eval_model(batch_images), batch_targets)
+                    batch_size = batch_targets.shape[0]
+                    total_loss += loss.item() * batch_size
+                    total_samples += batch_size
+        finally:
+            if was_training:
+                eval_model.train()
         if total_samples == 0:
             raise ValueError("Validation loader is empty")
         return total_loss / total_samples
 
     def _ranking_metrics(self, ranking: RankingEvalData) -> dict[str, float]:
         return compute_ranking_metrics(
-            self.ema_model,
+            self._inference_model(),
             ranking.gallery_loader,
             ranking.queries,
             ranking.gallery_attrs,
@@ -273,11 +291,17 @@ class Trainer:
         selection_metric = ranking_metrics.get("mADM", ranking_metrics["mAP"])
         return metrics, postfix, selection_metric
 
+    def _reset_swad_average_from_live_model(self) -> None:
+        """Seed AveragedModel with current weights so the SWAD window starts clean."""
+        self.ema_model.module.load_state_dict(self.model.state_dict())
+        self.ema_model.n_averaged.zero_()
+
     def _log_swad_val_loss(self, val_loss: float) -> None:
         was_active = self._swad.active
         was_stopped = self._swad.stopped
         self._swad.observe_val_loss(val_loss)
         if self._swad.active and not was_active:
+            self._reset_swad_average_from_live_model()
             self.tracker.logger.info(
                 "SWAD averaging started val_loss=%.6f plateau_patience=%d",
                 val_loss,
