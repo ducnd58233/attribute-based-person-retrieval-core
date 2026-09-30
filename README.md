@@ -119,6 +119,7 @@ Assemble `build/submission/` from the tracked template + a training checkpoint
 | `--config` | no | `configs/convnext_baseline.yml` | Rebuild architecture for a clean weight export. |
 | `--out` | no | `build/submission` | Destination folder (contents are replaced). |
 | `--template` | no | `submission` | Tracked `run.py` + `metadata.yaml` template directory. |
+| `--tta` | no | keep config | Override packaged `inference_tta` views (e.g. `identity`) without editing the train YAML. |
 
 ```sh
 uv run python scripts/package-submission.py \
@@ -129,6 +130,12 @@ uv run python scripts/package-submission.py \
   --config configs/convnext_baseline.yml \
   --out build/submission \
   --template submission
+
+# Heavy backbones: ship identity-only TTA if multi-view overruns the 1h wall clock
+uv run python scripts/package-submission.py \
+  --checkpoint runs/e17_clip_b16_lpft/checkpoints/best.pt \
+  --config configs/e17_clip_b16_lpft.yml \
+  --tta identity
 ```
 
 ### `scripts/export-colab-notebook.py`
