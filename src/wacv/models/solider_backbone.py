@@ -1295,7 +1295,10 @@ class SwinTransformer(BaseModule):
                     constant_init(m.bias, 0)
                     constant_init(m.weight, 1.0)
         else:
-            ckpt = torch.load(pretrained,map_location='cpu')
+            # Official SOLIDER LUPerson .pth pickles numpy scalars; PyTorch 2.6+
+            # defaults weights_only=True and rejects them. Source is the trusted
+            # tinyvision Drive release (see solider.py provenance constants).
+            ckpt = torch.load(pretrained, map_location="cpu", weights_only=False)
             if 'teacher' in ckpt:
                 ckpt = ckpt['teacher']
 
