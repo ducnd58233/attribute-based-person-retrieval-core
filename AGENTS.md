@@ -6,6 +6,19 @@ Retrieval)**. Mounted as a git submodule of the docs-only
 `PROBLEM-DETAILS.md` for the competition rules and `RESEARCH-*.md`/`PLAN-*.md`
 for the approach before writing any model code here.
 
+**Re-read parent `PROBLEM-DETAILS.md` Terms/Conditions before research /
+train / package / submit (MUST):** before starting or continuing training,
+packaging, or Codabench submission work in this repo, re-read the **Terms
+and Conditions** section in the parent workspace's `PROBLEM-DETAILS.md`
+(including the note that the live Terms tab names Track 1). Apply the shared
+constraints that clearly carry to Track 2: organizer training data only; no
+external data to fine-tune for the task; ImageNet / foundation / VLM
+pretrains OK if not specifically trained for PAR; no use of test images
+(train, pseudo-label, annotate, hyperparam selection); submission must not
+access the network or tamper with the evaluation environment; data licence /
+research-only. Track 2 ranking metric and submission format come from Track
+2 pages in that same file — do not invent Track-2-only term rewrites.
+
 <scope>
 
 This repo holds training code, inference code, and the environment/tooling
