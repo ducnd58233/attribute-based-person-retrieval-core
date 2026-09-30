@@ -187,21 +187,48 @@ def _build_model(card: dict[str, Any]) -> nn.Module:
     )
 
 
+def _image_hw_from_card(card: dict[str, Any]) -> tuple[int, int]:
+    size = card.get("image_size", [256, 128])
+    if not isinstance(size, list) or len(size) != 2:
+        return 256, 128
+    return int(size[0]), int(size[1])
+
+
+def _cuda_forward_works(model: nn.Module, card: dict[str, Any]) -> bool:
+    """True if a real CUDA forward works (capability mismatches fail here)."""
+    if not torch.cuda.is_available():
+        return False
+    height, width = _image_hw_from_card(card)
+    try:
+        probe = torch.zeros(1, 3, height, width, device="cuda")
+        with torch.inference_mode():
+            model(probe)
+        torch.cuda.synchronize()
+    except RuntimeError:
+        return False
+    return True
+
+
 def load_model() -> None:
     """Load weights once. Safe to call repeatedly."""
     if _STATE["model"] is not None:
         return
     with CARD_PATH.open(encoding="utf-8") as handle:
         card = json.load(handle)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    prefer_cuda = torch.cuda.is_available()
+    load_device = torch.device("cuda" if prefer_cuda else "cpu")
     if str(card.get("weight_format", "state_dict")) == "torchscript":
-        model = torch.jit.load(WEIGHTS_PATH, map_location=device)
+        model = torch.jit.load(WEIGHTS_PATH, map_location=load_device)
     else:
         model = _build_model(card)
-        state = torch.load(WEIGHTS_PATH, map_location=device, weights_only=True)
+        state = torch.load(WEIGHTS_PATH, map_location=load_device, weights_only=True)
         model.load_state_dict(state)
-        model.to(device)
+        model.to(load_device)
     model.eval()
+    device = load_device
+    if prefer_cuda and not _cuda_forward_works(model, card):
+        model = model.to(torch.device("cpu"))
+        device = torch.device("cpu")
     _STATE["model"] = model
     _STATE["device"] = device
     _STATE["card"] = card
