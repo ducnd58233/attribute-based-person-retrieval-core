@@ -45,3 +45,16 @@ def test_hard_query_adapter_semantic_margin_matrix() -> None:
     assert margins[0, 0].item() == 0.0
     assert margins[1, 1].item() == 0.0
     assert margins[0, 1].item() > 0.0
+
+
+def test_pooled_features_supports_encode_features_api() -> None:
+    """CLIP-style backbones expose encode_features instead of ConvNeXt features."""
+    from src.wacv.query_adapter import pooled_features
+
+    class _FakeClip(torch.nn.Module):
+        def encode_features(self, images: torch.Tensor) -> torch.Tensor:
+            return images.mean(dim=(2, 3))
+
+    images = torch.randn(2, 3, 8, 4)
+    out = pooled_features(_FakeClip(), images)
+    assert out.shape == (2, 3)

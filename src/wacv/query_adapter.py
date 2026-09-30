@@ -46,6 +46,9 @@ def _feature_dim_from_classifier(classifier: nn.Module) -> int:
 
 def pooled_features(model: nn.Module, images: torch.Tensor) -> torch.Tensor:
     """Extract global pooled features before the attribute classification head."""
+    encode = getattr(model, "encode_features", None)
+    if callable(encode):
+        return cast(torch.Tensor, encode(images))
     if hasattr(model, "features") and hasattr(model, "avgpool"):
         backbone = cast(_ConvNeXtLike, model)
         features = backbone.features(images)
@@ -135,6 +138,9 @@ class AttributeModelWithHardQuery(nn.Module):
 
     @staticmethod
     def _infer_feature_dim(backbone: nn.Module) -> int:
+        feature_dim_attr = getattr(backbone, "feature_dim", None)
+        if isinstance(feature_dim_attr, int) and feature_dim_attr > 0:
+            return feature_dim_attr
         if hasattr(backbone, "classifier"):
             classifier = cast(_ConvNeXtLike, backbone).classifier
             head = (

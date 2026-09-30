@@ -207,7 +207,7 @@ def maybe_wrap_logit_adjust(
     return LogitAdjustedLoss(criterion, offset)  # type: ignore[arg-type]
 
 
-def main() -> None:
+def main() -> None:  # noqa: PLR0915
     from src.wacv.checkpoint import load_model_weights
     from src.wacv.config import load_config
     from src.wacv.engine import Trainer, resolve_device, seed_everything
@@ -215,6 +215,7 @@ def main() -> None:
     from src.wacv.models import build_model
     from src.wacv.models.clip import ClipAttributeClassifier
     from src.wacv.monitoring.tracking import RunTracker
+    from src.wacv.query_adapter import AttributeModelWithHardQuery
     from src.wacv.utils import configure_default_logging
 
     configure_default_logging()
@@ -299,6 +300,69 @@ def main() -> None:
             optimizer = torch.optim.AdamW(ft_groups)
             tracker.logger.info(
                 "LP-FT stage 2: full FT epochs=%d base_lr=%s layer_decay=%s",
+                config.optimization.epochs,
+                config.optimization.learning_rate,
+                config.optimization.layer_decay,
+            )
+        elif (
+            config.optimization.lp_ft
+            and isinstance(model, AttributeModelWithHardQuery)
+            and isinstance(model.backbone, ClipAttributeClassifier)
+        ):
+            clip = model.backbone
+            clip.freeze_backbone()
+            lp_config = config.model_copy(
+                update={
+                    "optimization": config.optimization.model_copy(
+                        update={"epochs": config.optimization.lp_epochs}
+                    )
+                }
+            )
+            lp_optimizer = torch.optim.AdamW(
+                (p for p in model.parameters() if p.requires_grad),
+                lr=config.optimization.lp_learning_rate,
+                weight_decay=config.optimization.weight_decay,
+            )
+            lp_scheduler = ReduceLROnPlateau(
+                lp_optimizer,
+                factor=config.optimization.scheduler_factor,
+                patience=config.optimization.scheduler_patience,
+            )
+            tracker.logger.info(
+                "LP-FT stage 1 (CLIP+adapter): lp_epochs=%d lr=%s",
+                config.optimization.lp_epochs,
+                config.optimization.lp_learning_rate,
+            )
+            Trainer(
+                model,
+                lp_optimizer,
+                lp_scheduler,
+                criterion,
+                device,
+                tracker,
+                lp_config,
+                asmr_context=asmr_context,
+            ).fit(train_loader, val_loader, ranking=ranking)
+            clip.unfreeze_backbone()
+            ft_groups = clip.layerwise_param_groups(
+                learning_rate=config.optimization.learning_rate,
+                weight_decay=config.optimization.weight_decay,
+                layer_decay=config.optimization.layer_decay,
+            )
+            adapter_params = [
+                p for p in model.hard_query_adapter.parameters() if p.requires_grad
+            ]
+            if adapter_params:
+                ft_groups.append(
+                    {
+                        "params": adapter_params,
+                        "lr": config.optimization.learning_rate,
+                        "weight_decay": config.optimization.weight_decay,
+                    }
+                )
+            optimizer = torch.optim.AdamW(ft_groups)
+            tracker.logger.info(
+                "LP-FT stage 2 (CLIP+adapter): ft_epochs=%d lr=%s decay=%s",
                 config.optimization.epochs,
                 config.optimization.learning_rate,
                 config.optimization.layer_decay,
