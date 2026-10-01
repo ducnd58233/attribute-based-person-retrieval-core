@@ -19,10 +19,11 @@ import subprocess
 from pathlib import Path
 from typing import Final
 
+from src.wacv.remote.kaggle import embed_staging_payload
 from src.wacv.remote.stage import ROOT, build_staging_dir
 
 STAGING_DIR: Final[Path] = ROOT / "build" / "remote-colab"
-REMOTE_DIR: Final[str] = "wacv-remote-train"
+REMOTE_ENTRY: Final[str] = "run_remote.py"
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -70,28 +71,19 @@ def run(args: argparse.Namespace) -> None:
     session = args.session
     colab = ["colab", "--auth", args.auth]
 
+    # google-colab-cli upload accepts a single *file*, not a directory. Embed
+    # the staged tree as a self-extracting run_remote.py (same as Kaggle).
+    embed_staging_payload(result.staging_dir)
+    entry = result.staging_dir / "run_remote.py"
+
     subprocess.run([*colab, "new", "-s", session, "--gpu", args.gpu], check=True)
     try:
         subprocess.run(
-            [
-                *colab,
-                "upload",
-                "-s",
-                session,
-                str(result.staging_dir),
-                REMOTE_DIR,
-            ],
+            [*colab, "upload", "-s", session, str(entry), REMOTE_ENTRY],
             check=True,
         )
         subprocess.run(
-            [
-                *colab,
-                "exec",
-                "-s",
-                session,
-                "-f",
-                f"{REMOTE_DIR}/run_remote.py",
-            ],
+            [*colab, "exec", "-s", session, "-f", REMOTE_ENTRY],
             check=True,
         )
         local_runs = ROOT / "runs" / result.run_name
@@ -105,7 +97,7 @@ def run(args: argparse.Namespace) -> None:
                 "download",
                 "-s",
                 session,
-                f"{REMOTE_DIR}/runs/{result.run_name}",
+                f"runs/{result.run_name}",
                 str(local_runs),
             ],
             check=True,
