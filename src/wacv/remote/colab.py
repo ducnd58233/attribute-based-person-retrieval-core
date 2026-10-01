@@ -23,7 +23,6 @@ from src.wacv.remote.kaggle import embed_staging_payload
 from src.wacv.remote.stage import ROOT, build_staging_dir
 
 STAGING_DIR: Final[Path] = ROOT / "build" / "remote-colab"
-REMOTE_ENTRY: Final[str] = "run_remote.py"
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -43,6 +42,12 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         choices=("adc", "oauth2"),
         default="adc",
         help="Pass-through to `colab --auth` (default adc for unattended runs).",
+    )
+    parser.add_argument(
+        "--timeout-hours",
+        type=float,
+        default=16.0,
+        help="Pass-through to `colab exec --timeout` (seconds = hours * 3600).",
     )
     parser.set_defaults(func=run)
 
@@ -73,17 +78,25 @@ def run(args: argparse.Namespace) -> None:
 
     # google-colab-cli upload accepts a single *file*, not a directory. Embed
     # the staged tree as a self-extracting run_remote.py (same as Kaggle).
+    # `colab exec -f` reads a *local* file and sends its source to the remote
+    # kernel — it does not look up a remote path.
     embed_staging_payload(result.staging_dir)
     entry = result.staging_dir / "run_remote.py"
+    timeout_s = max(args.timeout_hours, 0.1) * 3600.0
 
     subprocess.run([*colab, "new", "-s", session, "--gpu", args.gpu], check=True)
     try:
         subprocess.run(
-            [*colab, "upload", "-s", session, str(entry), REMOTE_ENTRY],
-            check=True,
-        )
-        subprocess.run(
-            [*colab, "exec", "-s", session, "-f", REMOTE_ENTRY],
+            [
+                *colab,
+                "exec",
+                "-s",
+                session,
+                "-f",
+                str(entry),
+                "--timeout",
+                str(timeout_s),
+            ],
             check=True,
         )
         local_runs = ROOT / "runs" / result.run_name
