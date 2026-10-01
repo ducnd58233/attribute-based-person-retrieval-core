@@ -1,42 +1,28 @@
 # E22 greedy model soup (H22 / Wortsman ICML 2022).
 #
-# This YAML is for evaluating or packaging a souped checkpoint — not for
-# training. Ingredients are future full-data runs of the best architecture
-# that share initialisation (seeds / promoted recipe variants). Fill them
-# after those runs exist; E14 does not need to be merged for this script.
+# Evaluate / package a souped DINOv2 checkpoint (not for training).
+# Ingredients: E20 seed42 + E20s2 seed43 + E20s3 seed44 (same LP-FT recipe).
 #
-# Build the soup:
+# Build (from attribute-based-person-retrieval-core-e22 worktree):
 #
-#   uv run python scripts/soup.py \
+#   .venv/bin/python scripts/soup.py \
 #     --mode greedy \
 #     --checkpoints \
-#       runs/<ing0>/checkpoints/best.pt \
-#       runs/<ing1>/checkpoints/best.pt \
-#       runs/<ing2>/checkpoints/best.pt \
+#       ../attribute-based-person-retrieval-core-e20/runs/e20_dinov2_lpft/checkpoints/best.pt \
+#       ../attribute-based-person-retrieval-core-e20s2/runs/e20_dinov2_seed43/checkpoints/best.pt \
+#       ../attribute-based-person-retrieval-core-e20s3/runs/e20_dinov2_seed44/checkpoints/best.pt \
 #     --metrics runs/e22_model_soup/ingredient_metrics.json \
 #     --config configs/e22_model_soup.yml \
 #     --out runs/e22_model_soup/checkpoints/soup.pt
 #
-# ingredient_metrics.json maps each checkpoint path (or basename) to its
-# ID-val mADM so greedy search tries stronger members first. Uniform soup
-# skips --metrics / live scoring:
-#
-#   uv run python scripts/soup.py --mode uniform \
-#     --checkpoints ... --out runs/e22_model_soup/checkpoints/soup_uniform.pt
-#
-# Then evaluate the soup like any other checkpoint:
-#
-#   uv run python scripts/evaluate.py \
+# Then:
+#   .venv/bin/python scripts/evaluate.py \
 #     --config configs/e22_model_soup.yml \
-#     --checkpoint runs/e22_model_soup/checkpoints/soup.pt
-#
-# Placeholder ingredients (replace when ready):
-#   - runs/<best_arch>_seed0/checkpoints/best.pt
-#   - runs/<best_arch>_seed1/checkpoints/best.pt
-#   - runs/<best_arch>_seed2/checkpoints/best.pt
+#     --checkpoint runs/e22_model_soup/checkpoints/soup.pt \
+#     --protocol both
 
 model:
-  name: convnext_base
+  name: dinov2_vitb14_reg
   pretrained: true
   dropout: 0.1
 
@@ -46,17 +32,21 @@ data:
   num_workers: 4
   limit: null
   train_augmentation: true
+  image_size: [252, 126]
+  train_domains:
+    - PA100k
+    - PETA
 
 optimization:
   epochs: 1
-  learning_rate: 0.0001
+  learning_rate: 0.00001
   weight_decay: 0.01
   pos_weight_clip: 10.0
   amp: true
   grad_clip_norm: 1.0
   ema_decay: 0.999
   scheduler_factor: 0.1
-  scheduler_patience: 3
+  scheduler_patience: 2
   label_smoothing: 0.05
   early_stop_patience: 1
 
@@ -72,6 +62,8 @@ ranking:
   distance: hybrid
   temperature: 1.0
   alpha: 0.5
+  query_norm: dual_softmax
+  query_norm_tau: 0.05
 
 inference:
   tta:
