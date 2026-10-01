@@ -167,7 +167,8 @@ def _build_id_val_score_fn(
             attribute_names=attribute_names,
             distance=config.ranking.distance,
         )
-        return float(metrics["mADM"])
+        # `_evaluate_protocol` remaps display keys via METRIC_KEY_MAP (mADM→madm).
+        return float(metrics["madm"])
 
     return score_fn
 
