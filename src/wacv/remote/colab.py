@@ -37,6 +37,12 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Build the staging folder and exit; no colab CLI or auth needed.",
     )
+    parser.add_argument(
+        "--auth",
+        choices=("adc", "oauth2"),
+        default="adc",
+        help="Pass-through to `colab --auth` (default adc for unattended runs).",
+    )
     parser.set_defaults(func=run)
 
 
@@ -62,15 +68,30 @@ def run(args: argparse.Namespace) -> None:
 
     require_supported_platform()
     session = args.session
+    colab = ["colab", "--auth", args.auth]
 
-    subprocess.run(["colab", "new", "-s", session, "--gpu", args.gpu], check=True)
+    subprocess.run([*colab, "new", "-s", session, "--gpu", args.gpu], check=True)
     try:
         subprocess.run(
-            ["colab", "upload", "-s", session, str(result.staging_dir), REMOTE_DIR],
+            [
+                *colab,
+                "upload",
+                "-s",
+                session,
+                str(result.staging_dir),
+                REMOTE_DIR,
+            ],
             check=True,
         )
         subprocess.run(
-            ["colab", "exec", "-s", session, "-f", f"{REMOTE_DIR}/run_remote.py"],
+            [
+                *colab,
+                "exec",
+                "-s",
+                session,
+                "-f",
+                f"{REMOTE_DIR}/run_remote.py",
+            ],
             check=True,
         )
         local_runs = ROOT / "runs" / result.run_name
@@ -80,7 +101,7 @@ def run(args: argparse.Namespace) -> None:
         (ROOT / "runs").mkdir(parents=True, exist_ok=True)
         subprocess.run(
             [
-                "colab",
+                *colab,
                 "download",
                 "-s",
                 session,
@@ -90,6 +111,6 @@ def run(args: argparse.Namespace) -> None:
             check=True,
         )
     finally:
-        subprocess.run(["colab", "stop", "-s", session], check=False)
+        subprocess.run([*colab, "stop", "-s", session], check=False)
 
     print(f"done: {ROOT / 'runs' / result.run_name}")
