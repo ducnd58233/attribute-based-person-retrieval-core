@@ -62,6 +62,71 @@ class RandomJpegCompression:
         return Image.open(buffer).convert("RGB")
 
 
+# V-deg fixed severities (HYPOTHESIS next-step): no colour ops; deterministic.
+VAL_DEGRADE_LEVELS: dict[str, dict[str, float | int]] = {
+    "L1": {"downscale": 0.60, "blur_sigma": 0.6, "jpeg_quality": 75},
+    "L2": {"downscale": 0.40, "blur_sigma": 1.0, "jpeg_quality": 55},
+    "L3": {"downscale": 0.28, "blur_sigma": 1.4, "jpeg_quality": 35},
+}
+
+
+class FixedDownscaleUpsample:
+    """Deterministic shrink-then-restore (fixed scale)."""
+
+    def __init__(self, scale: float) -> None:
+        if not (0.0 < scale <= 1.0):
+            raise ValueError(f"scale must be in (0, 1], got {scale}")
+        self._scale = float(scale)
+
+    def __call__(self, image: Image.Image) -> Image.Image:
+        width, height = image.size
+        small_w = max(1, int(width * self._scale))
+        small_h = max(1, int(height * self._scale))
+        reduced = image.resize((small_w, small_h), Image.BILINEAR)
+        return reduced.resize((width, height), Image.BILINEAR)
+
+
+class FixedJpegCompression:
+    """Deterministic JPEG re-encode at a fixed quality."""
+
+    def __init__(self, quality: int) -> None:
+        if not (1 <= int(quality) <= 100):
+            raise ValueError(f"jpeg quality must be 1..100, got {quality}")
+        self._quality = int(quality)
+
+    def __call__(self, image: Image.Image) -> Image.Image:
+        buffer = BytesIO()
+        image.save(buffer, format="JPEG", quality=self._quality)
+        buffer.seek(0)
+        return Image.open(buffer).convert("RGB")
+
+
+def val_degrade_transform(
+    size: tuple[int, int],
+    level: str,
+    *,
+    mean: list[float],
+    std: list[float],
+) -> transforms.Compose:
+    """Eval transform with fixed V-deg severity (no hue/saturation ops)."""
+    if level not in VAL_DEGRADE_LEVELS:
+        raise ValueError(f"Unknown val degrade level {level!r}; expected L1/L2/L3")
+    spec = VAL_DEGRADE_LEVELS[level]
+    scale = float(spec["downscale"])
+    blur_sigma = float(spec["blur_sigma"])
+    jpeg_q = int(spec["jpeg_quality"])
+    return transforms.Compose(
+        [
+            transforms.Resize(size),
+            FixedDownscaleUpsample(scale),
+            transforms.GaussianBlur(kernel_size=3, sigma=(blur_sigma, blur_sigma)),
+            FixedJpegCompression(jpeg_q),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=mean, std=std),
+        ]
+    )
+
+
 def color_jitter_hue_span(
     pipeline: transforms.Compose,
 ) -> tuple[float, float] | None:
@@ -158,25 +223,30 @@ def transforms_for_model(
     train: bool,
     image_size: tuple[int, int] = DEFAULT_IMAGE_SIZE,
     degrade_aug: DegradeAugConfig | None = None,
+    val_degrade: str | None = None,
 ) -> transforms.Compose:
     """Pick ImageNet or CLIP preprocessing at ``image_size`` (H, W)."""
     size = (int(image_size[0]), int(image_size[1]))
     use_degrade = train and degrade_aug is not None and degrade_aug.enabled
+    if val_degrade is not None and train:
+        raise ValueError("val_degrade is eval-only; refuse train=True")
     if model_name.startswith("clip_"):
+        mean, std = _CLIP_MEAN, _CLIP_STD
         if train:
             if use_degrade:
-                return _train_transform_degrade(
-                    size, degrade_aug, mean=_CLIP_MEAN, std=_CLIP_STD
-                )
-            return _train_transform(size, mean=_CLIP_MEAN, std=_CLIP_STD)
-        return _eval_transform(size, mean=_CLIP_MEAN, std=_CLIP_STD)
+                return _train_transform_degrade(size, degrade_aug, mean=mean, std=std)
+            return _train_transform(size, mean=mean, std=std)
+        if val_degrade is not None:
+            return val_degrade_transform(size, val_degrade, mean=mean, std=std)
+        return _eval_transform(size, mean=mean, std=std)
+    mean, std = _IMAGENET_MEAN, _IMAGENET_STD
     if train:
         if use_degrade:
-            return _train_transform_degrade(
-                size, degrade_aug, mean=_IMAGENET_MEAN, std=_IMAGENET_STD
-            )
-        return _train_transform(size, mean=_IMAGENET_MEAN, std=_IMAGENET_STD)
-    return _eval_transform(size, mean=_IMAGENET_MEAN, std=_IMAGENET_STD)
+            return _train_transform_degrade(size, degrade_aug, mean=mean, std=std)
+        return _train_transform(size, mean=mean, std=std)
+    if val_degrade is not None:
+        return val_degrade_transform(size, val_degrade, mean=mean, std=std)
+    return _eval_transform(size, mean=mean, std=std)
 
 
 def load_gt(csv_path: Path) -> pd.DataFrame:

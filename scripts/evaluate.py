@@ -6,6 +6,7 @@ import argparse
 import json
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -63,6 +64,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="override ranking.distance from the config",
     )
+    parser.add_argument(
+        "--degrade",
+        choices=("none", "L1", "L2", "L3"),
+        default="none",
+        help="V-deg fixed severity on val images (T28); none = clean eval",
+    )
     return parser.parse_args()
 
 
@@ -99,6 +106,46 @@ def _protocol_metrics_keys(
     return out
 
 
+@dataclass(frozen=True)
+class ProtocolEvalOpts:
+    """Optional knobs for one protocol evaluation."""
+
+    distance: str
+    calibration_out: Path | None = None
+    val_degrade: str | None = None
+
+
+def _per_attribute_ma(probabilities: np.ndarray, targets: np.ndarray) -> list[float]:
+    predictions = probabilities >= 0.5
+    positives = targets == 1
+    negatives = ~positives
+    true_positive_rate = (predictions & positives).sum(axis=0) / np.maximum(
+        positives.sum(axis=0), 1
+    )
+    true_negative_rate = ((~predictions) & negatives).sum(axis=0) / np.maximum(
+        negatives.sum(axis=0), 1
+    )
+    return [float(value) for value in (0.5 * (true_positive_rate + true_negative_rate))]
+
+
+def _per_dataset_ma(
+    probabilities: np.ndarray,
+    attributes: np.ndarray,
+    image_paths: list[str],
+) -> dict[str, float]:
+    from src.wacv.data import domain_from_image
+    from src.wacv.evaluation import mean_accuracy
+
+    domains = [domain_from_image(path) for path in image_paths]
+    out: dict[str, float] = {}
+    for domain in sorted(set(domains)):
+        mask = np.asarray([value == domain for value in domains], dtype=bool)
+        if not np.any(mask):
+            continue
+        out[domain] = mean_accuracy(probabilities[mask], attributes[mask])
+    return out
+
+
 def _evaluate_protocol(
     *,
     config: ExperimentConfig,
@@ -107,11 +154,14 @@ def _evaluate_protocol(
     ground_truth,
     queries: np.ndarray,
     attribute_names: tuple[str, ...],
-    distance: str,
-    calibration_out: Path | None = None,
-) -> dict[str, float]:
+    opts: ProtocolEvalOpts,
+) -> dict[str, object]:
     from src.wacv.data import AttributeDataset, transforms_for_model
     from src.wacv.engine import resolve_num_workers
+    from src.wacv.error_budget import (
+        error_budget_to_dict,
+        top1_non_match_error_budget,
+    )
     from src.wacv.evaluation import (
         apply_per_attribute_temperatures,
         dual_softmax_rerank,
@@ -134,6 +184,7 @@ def _evaluate_protocol(
                     int(config.data.image_size[0]),
                     int(config.data.image_size[1]),
                 ),
+                val_degrade=opts.val_degrade,
             ),
             attribute_names=attribute_names,
         ),
@@ -160,9 +211,9 @@ def _evaluate_protocol(
             probabilities, temperatures
         )
         score_temperature = 1.0
-        if calibration_out is not None:
-            calibration_out.parent.mkdir(parents=True, exist_ok=True)
-            calibration_out.write_text(
+        if opts.calibration_out is not None:
+            opts.calibration_out.parent.mkdir(parents=True, exist_ok=True)
+            opts.calibration_out.write_text(
                 json.dumps(
                     {
                         "mode": "per_attribute",
@@ -176,7 +227,7 @@ def _evaluate_protocol(
             )
     gallery_embeddings = None
     query_embeddings = None
-    if distance == "clear_hard":
+    if opts.distance == "clear_hard":
         gallery_embeddings, query_embeddings = _clear_hard_embeddings(
             model,
             loader,
@@ -187,7 +238,7 @@ def _evaluate_protocol(
     distances = ranking_distance(
         queries,
         score_probabilities,
-        distance=distance,
+        distance=opts.distance,
         temperature=score_temperature,
         alpha=config.ranking.alpha,
         gallery_embeddings=gallery_embeddings,
@@ -205,7 +256,17 @@ def _evaluate_protocol(
     )
     metrics["mA"] = mean_accuracy(probabilities, attributes)
     wall_seconds = time.perf_counter() - started
-    return _protocol_metrics_keys(metrics, wall_seconds)
+    result: dict[str, object] = dict(_protocol_metrics_keys(metrics, wall_seconds))
+    result["per_attr_ma"] = _per_attribute_ma(probabilities, attributes)
+    result["per_dataset"] = _per_dataset_ma(
+        probabilities,
+        attributes,
+        [str(path) for path in ground_truth["image"].tolist()],
+    )
+    result["error_budget"] = error_budget_to_dict(
+        top1_non_match_error_budget(queries, attributes, distances)
+    )
+    return result
 
 
 def _prepare_protocol_data(
@@ -242,7 +303,8 @@ def evaluate_checkpoint(
     *,
     protocols: tuple[ProtocolName, ...],
     distance: str | None = None,
-) -> tuple[dict[str, dict[str, float]], ExperimentConfig]:
+    degrade: str = "none",
+) -> tuple[dict[str, dict[str, object]], ExperimentConfig]:
     from src.wacv.checkpoint import load_model_weights
     from src.wacv.config import load_config
     from src.wacv.engine import resolve_device
@@ -251,13 +313,14 @@ def evaluate_checkpoint(
     config = load_config(config_path)
     device = resolve_device(config.run.device)
     distance_name = distance or config.ranking.distance
+    val_degrade = None if degrade == "none" else degrade
 
     _, _, attribute_names = _prepare_protocol_data(config, protocols[0])
     inference_model = config.model.model_copy(update={"pretrained": False})
     model = build_model(inference_model, num_attributes=len(attribute_names)).to(device)
     load_model_weights(checkpoint.resolve(), model, map_location=device)
 
-    results: dict[str, dict[str, float]] = {}
+    results: dict[str, dict[str, object]] = {}
     run_dir = config.run.output_dir / config.run.name
     for protocol in protocols:
         ground_truth, queries, names = _prepare_protocol_data(config, protocol)
@@ -266,29 +329,48 @@ def evaluate_checkpoint(
             calibration_path = run_dir / f"calibration_{protocol}.json"
             if protocol == "id_val":
                 calibration_path = run_dir / "calibration.json"
-        results[protocol] = _evaluate_protocol(
+        protocol_key = (
+            protocol if val_degrade is None else f"{protocol}_deg_{val_degrade}"
+        )
+        results[protocol_key] = _evaluate_protocol(
             config=config,
             model=model,
             device=device,
             ground_truth=ground_truth,
             queries=queries,
             attribute_names=names,
-            distance=distance_name,
-            calibration_out=calibration_path,
+            opts=ProtocolEvalOpts(
+                distance=distance_name,
+                calibration_out=calibration_path,
+                val_degrade=val_degrade,
+            ),
         )
     return results, config
 
 
+def _coerce_metric_value(value: object) -> object:
+    if isinstance(value, dict):
+        return {str(key): _coerce_metric_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_coerce_metric_value(item) for item in value]
+    if isinstance(value, (int, float, str, bool)) or value is None:
+        return value
+    return float(value)  # type: ignore[arg-type]
+
+
 def _merge_metrics_file(
-    path: Path, update: dict[str, dict[str, float]]
-) -> dict[str, dict[str, float]]:
-    merged: dict[str, dict[str, float]] = {}
+    path: Path, update: dict[str, dict[str, object]]
+) -> dict[str, dict[str, object]]:
+    merged: dict[str, dict[str, object]] = {}
     if path.is_file():
         existing = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(existing, dict):
             for key, value in existing.items():
                 if isinstance(value, dict):
-                    merged[key] = {str(k): float(v) for k, v in value.items()}
+                    merged[str(key)] = {
+                        str(inner_key): _coerce_metric_value(inner_value)
+                        for inner_key, inner_value in value.items()
+                    }
     merged.update(update)
     return merged
 
@@ -312,6 +394,7 @@ def main() -> None:
         checkpoint,
         protocols=protocols,
         distance=args.distance,
+        degrade=args.degrade,
     )
     serialized = json.dumps(results, indent=2, sort_keys=True) + "\n"
     run_dir = config.run.output_dir / config.run.name
