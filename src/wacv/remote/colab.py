@@ -41,14 +41,16 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path("/content")
-PAYLOAD = ROOT / "payload.zip"
+PAYLOAD_CANDIDATES = (ROOT / "payload.zip", Path("/payload.zip"))
 
 
 def main() -> None:
     ROOT.mkdir(parents=True, exist_ok=True)
-    if not PAYLOAD.is_file():
-        raise FileNotFoundError(f"missing uploaded payload: {PAYLOAD}")
-    with zipfile.ZipFile(PAYLOAD) as archive:
+    payload = next((path for path in PAYLOAD_CANDIDATES if path.is_file()), None)
+    if payload is None:
+        looked = [str(path) for path in PAYLOAD_CANDIDATES]
+        raise FileNotFoundError(f"missing uploaded payload; looked in {looked}")
+    with zipfile.ZipFile(payload) as archive:
         archive.extractall(ROOT)
     entry = ROOT / "run_remote.py"
     if not entry.is_file():
