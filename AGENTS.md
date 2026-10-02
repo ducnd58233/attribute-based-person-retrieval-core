@@ -198,6 +198,32 @@ here.
   same predict → rank → score sequence across several earlier PRs before
   one refactor finally noticed and extracted `compute_ranking_metrics` -
   the second copy should never have been written standalone.
+- **`submission/run.py` mirrors the library's dtype and memory shape, not
+  just its logic (MUST):** `submission/` is intentionally self-contained
+  (no `src.wacv` import - it ships standalone into the sandboxed Codabench
+  eval image, see the file's own docstring), so every prediction/ranking
+  function it reimplements has to copy the library's numeric behavior
+  exactly, not re-derive it. Codabench submission 948099 failed exactly
+  this way: `submission/run.py`'s `_dual_softmax_rerank` allocated the
+  full Q×G distance matrix as **float64** (~6.5GB peak on a real
+  ~3462×33407 gallery) after `src/wacv/evaluation/__init__.py`'s own
+  `dual_softmax_rerank` had already moved to a chunked **float32**
+  version - the submission template simply lagged. Codabench's ingestion
+  worker OOM-killed the child process with an opaque platform message
+  ("non-zero return code"), not a Python traceback, so nothing pointed at
+  the actual line; `pytest` and Docker's `load_model`/small-gallery smoke
+  both passed, since neither exercises a gallery large enough to OOM.
+  After touching any submission-side reimplementation of library math,
+  run (or add, if the function is new) a parity test like
+  `tests/test_dual_softmax.py`'s
+  `test_submission_dual_softmax_matches_library` - it dynamically loads
+  `submission/run.py` and asserts its output matches the library function's,
+  which is what actually catches a
+  re-derivation that drifted. A parity test is necessary but not
+  sufficient on its own: it proves the two agree on a small array, not
+  that either one's *memory* scales to a real gallery size - test at (or
+  above) the real gallery shape when the change is about a memory
+  footprint rather than a formula.
 - **A memory fix for a ranking function is not done until the whole
   ranking stage is profiled at real gallery scale, not just the one
   function that was touched (MUST):** Codabench submission 948099 was
