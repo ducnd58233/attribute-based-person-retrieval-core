@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Annotated, Literal
 
 import yaml
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PositiveFloat
 from pydantic.types import NonNegativeInt, PositiveInt
+
+# Shared across git worktrees; see AGENTS.md "Experiment worktrees: shared data".
+DATA_ROOT_ENV = "WACV_DATA_ROOT"
 
 ModelName = Literal[
     "resnet50",
@@ -206,6 +210,23 @@ def _resolve(path: Path | None, project_root: Path) -> Path | None:
     return path if path.is_absolute() else (project_root / path).resolve()
 
 
+def resolve_data_root(configured: Path, project_root: Path) -> Path:
+    """Resolve ``data.root``, honoring ``WACV_DATA_ROOT`` when set.
+
+    Experiment worktrees must share one dataset tree (the main checkout's
+    ``data/``). Set ``WACV_DATA_ROOT`` to that absolute path, or symlink
+    ``data -> ../attribute-based-person-retrieval-core/data``. Env wins over
+    a relative YAML ``data.root`` so worktrees do not re-download.
+    """
+    override = os.environ.get(DATA_ROOT_ENV, "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    resolved = _resolve(configured, project_root)
+    if resolved is None:
+        raise ValueError("data.root resolved to None")
+    return resolved
+
+
 def _resolve_resume(
     resume: Path | Literal[True] | None,
     output_dir: Path,
@@ -226,7 +247,9 @@ def load_config(path: Path, *, project_root: Path | None = None) -> ExperimentCo
         project_root.resolve() if project_root else Path(__file__).resolve().parents[2]
     )
 
-    data = config.data.model_copy(update={"root": _resolve(config.data.root, root)})
+    data = config.data.model_copy(
+        update={"root": resolve_data_root(config.data.root, root)}
+    )
     output_dir = _resolve(config.run.output_dir, root)
     if output_dir is None:
         raise ValueError("run.output_dir resolved to None")
