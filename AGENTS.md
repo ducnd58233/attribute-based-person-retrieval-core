@@ -200,10 +200,11 @@ here.
   dependency for something already minimal and correct.
 - **Grep the whole repo before deleting a function or class as dead
   (MUST):** "looks unused in this file" is not evidence. Search every
-  `src/`, `scripts/`, `tests/`, and `submission/` file for the exact name
-  before removing it, and note in the PR description (or commit body)
-  that the search came back empty. `data.py::load_query_ids` and
-  `query_adapter.py::unwrap_backbone` were removed this way - a
+  `src/`, `scripts/`, `tests/`, `submission/`, `configs/`, and
+  `deployments/` file for the exact name before removing it, and note in the
+  PR description (or commit body) that the search came back empty.
+  `query_adapter.py::unwrap_backbone`, `attach_hard_query_adapter` and the
+  whole `wise_ft` cluster were removed this way - a
   same-file-only look would have missed that `scripts/export-colab-
   notebook.py`'s AST-walk-based inlining is also a real caller for some
   functions, which a narrower search would not have ruled out.
