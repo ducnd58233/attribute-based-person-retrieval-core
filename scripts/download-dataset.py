@@ -1,17 +1,24 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-import numpy as np
-from tqdm import tqdm
-
 ROOT = Path(__file__).resolve().parents[1]
-DATA = ROOT / "data"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 CACHE = ROOT / ".cache" / "UPAR-Challenge-2027"
 STARTER_URL = "https://github.com/speckean/UPAR-Challenge-2027.git"
+
+
+def resolve_data_dir() -> Path:
+    """Same rules as ``load_config``: env → local → sibling main checkout."""
+    from src.wacv.config import resolve_data_root
+
+    return resolve_data_root(Path("data"), ROOT)
 
 
 def clone_starter() -> Path:
@@ -27,19 +34,22 @@ def clone_starter() -> Path:
     return CACHE
 
 
-def copy_annotations(starter: Path) -> None:
+def copy_annotations(starter: Path, data: Path) -> None:
     src = starter / "data" / "annotations"
-    dst = DATA / "annotations"
+    dst = data / "annotations"
     if dst.is_dir():
         print(f"annotations already present: {dst}")
         return
-    DATA.mkdir(parents=True, exist_ok=True)
+    data.mkdir(parents=True, exist_ok=True)
     shutil.copytree(src, dst)
     print(f"copied annotations -> {dst}")
 
 
-def remap_peta(starter: Path) -> None:
-    peta = DATA / "PETA"
+def remap_peta(starter: Path, data: Path) -> None:
+    import numpy as np
+    from tqdm import tqdm
+
+    peta = data / "PETA"
     images = peta / "images"
     if not peta.is_dir():
         print("PETA folder missing; skip remap")
@@ -57,33 +67,60 @@ def remap_peta(starter: Path) -> None:
         return
 
     for file in tqdm(files, desc="Remap PETA"):
-        rel = file.relative_to(DATA).as_posix()
-        dest = DATA / mapping[rel]
+        rel = file.relative_to(data).as_posix()
+        dest = data / mapping[rel]
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(file, dest)
     print(f"PETA remap done -> {images}")
 
 
-def download_images(starter: Path) -> None:
+def download_images(starter: Path, data: Path) -> None:
     cmd = [
         sys.executable,
         str(starter / "download_datasets.py"),
         "--data-dir",
-        str(DATA),
+        str(data),
     ]
     print("downloading Market1501 / PA100K / PETA...")
     # BTC fails on Windows at PETA remap; zip/extract may already be done.
     result = subprocess.run(cmd, cwd=str(starter), check=False)
     if result.returncode != 0:
         print("BTC script exited non-zero (expected on Windows PETA remap)")
-    remap_peta(starter)
+    remap_peta(starter, data)
 
 
 def main() -> None:
+    from src.wacv.config import (
+        DATA_ROOT_ENV,
+        MAIN_CHECKOUT_DIRNAME,
+        dataset_looks_present,
+    )
+
+    data = resolve_data_dir()
+    local = (ROOT / "data").resolve()
+    if os.environ.get(DATA_ROOT_ENV, "").strip():
+        print(f"{DATA_ROOT_ENV}={data}")
+    elif data != local:
+        print(f"using shared data root (sibling main checkout): {data}")
+    if dataset_looks_present(data):
+        print(f"dataset already present under {data}; skipping download")
+        print(
+            f"(unset {DATA_ROOT_ENV} and remove data/ only if you "
+            "truly need a re-fetch)"
+        )
+        return
+    # Experiment worktrees must never materialize a second organizer copy.
+    main_checkout = (ROOT.parent / MAIN_CHECKOUT_DIRNAME).resolve()
+    if main_checkout.is_dir() and main_checkout != ROOT.resolve():
+        data = main_checkout / "data"
+        print(
+            f"worktree download redirected to main checkout data/: {data}\n"
+            "  (see AGENTS.md 'Experiment worktrees: shared data root')"
+        )
     starter = clone_starter()
-    copy_annotations(starter)
-    download_images(starter)
-    print(f"Done under {DATA}")
+    copy_annotations(starter, data)
+    download_images(starter, data)
+    print(f"Done under {data}")
 
 
 if __name__ == "__main__":

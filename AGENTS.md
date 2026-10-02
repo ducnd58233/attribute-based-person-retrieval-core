@@ -84,6 +84,39 @@ here.
   under a gitignored `data/` (already in `.gitignore`); the real training
   data and hidden test set are never committed here, per the competition's
   licence terms in the parent workspace's `PROBLEM-DETAILS.md`.
+- **Experiment worktrees: shared data root (MUST):** every `git worktree`
+  for an experiment (`…-core-e34`, `…-core-e60`, …) **must** reuse the
+  main checkout's organizer dataset — **no second `scripts/download-dataset.py`
+  run and no duplicated `data/` trees**. Default YAML `data.root: data` is
+  relative to that worktree, which is why naive downloads fill the disk.
+
+  Prefer a junction/symlink in the new worktree (do this immediately after
+  `git worktree add`, before any train/download):
+
+  ```sh
+  # from the new worktree root; MAIN is the primary core checkout
+  MAIN="../attribute-based-person-retrieval-core"
+  # Git Bash / WSL:
+  ln -sfn "$(cd "$MAIN" && pwd)/data" data
+  # Windows CMD (admin not required for /J):
+  # mklink /J data ..\attribute-based-person-retrieval-core\data
+  ```
+
+  Or set an absolute override (also honored by `load_config` and
+  `scripts/download-dataset.py`; may live in `.env` — see `.env.example`):
+
+  ```sh
+  export WACV_DATA_ROOT="$(cd ../attribute-based-person-retrieval-core && pwd)/data"
+  ```
+
+  If neither a local `data/` corpus nor `WACV_DATA_ROOT` is set,
+  `resolve_data_root` / `download-dataset.py` automatically fall back to
+  sibling `../attribute-based-person-retrieval-core/data` when that tree
+  already looks complete — so a fresh worktree must not re-download.
+  Still create the junction/symlink so tools that assume `./data` keep
+  working. `download-dataset.py` skips only when annotations **and** all
+  three corpora (Market1501, PA100k, PETA) exist under the resolved root.
+  Never delete the main worktree's `data/`.
 - **Never commit trained model weights** to git history directly; use
   Git LFS, Hugging Face Hub, or another artifact store, and document
   wherever weights are pulled from in the model's own README.
