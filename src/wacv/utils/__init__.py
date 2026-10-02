@@ -6,12 +6,10 @@ from src.wacv.utils.logging import (
     LoggingConfig,
     configure_default_logging,
     configure_logging,
-    configure_stdout_utf8,
 )
 
 __all__ = (
     "LoggingConfig",
     "configure_default_logging",
     "configure_logging",
-    "configure_stdout_utf8",
 )

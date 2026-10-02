@@ -321,20 +321,6 @@ def main() -> None:
         metrics_path.write_text(
             json.dumps(merged, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
-        # Keep legacy single-protocol dump for id_val callers.
-        if "id_val" in results:
-            legacy = {
-                "mADM": results["id_val"]["madm"],
-                "mAP": results["id_val"]["map"],
-                "Rank-1": results["id_val"]["rank1"],
-                "Rank-5": results["id_val"]["rank5"],
-                "Rank-10": results["id_val"]["rank10"],
-                "mINP": results["id_val"]["minp"],
-                "mA": results["id_val"]["ma"],
-            }
-            (run_dir / "evaluation.json").write_text(
-                json.dumps(legacy, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-            )
     print(serialized, end="")
 
 

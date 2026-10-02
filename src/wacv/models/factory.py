@@ -7,7 +7,7 @@ from src.wacv.models.clip import build_clip_attribute_classifier, build_clip_vit
 from src.wacv.models.convnext import build_convnext
 from src.wacv.models.dinov2 import build_dinov2_vitb14_reg
 from src.wacv.models.resnet import build_resnet50
-from src.wacv.query_adapter import attach_hard_query_adapter
+from src.wacv.query_adapter import AttributeModelWithHardQuery
 
 
 def build_model(config: ModelConfig, *, num_attributes: int) -> nn.Module:
@@ -54,7 +54,7 @@ def build_model(config: ModelConfig, *, num_attributes: int) -> nn.Module:
         )
     if not config.hard_query_adapter:
         return backbone
-    return attach_hard_query_adapter(
+    return AttributeModelWithHardQuery(
         backbone,
         num_attributes=num_attributes,
         adapter_dim=config.adapter_dim,

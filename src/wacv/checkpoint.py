@@ -123,15 +123,11 @@ def load_model_weights(
     prefer_ema: bool = True,
     strict: bool = True,
 ) -> None:
-    """Load a full trainer checkpoint or a legacy model-only state dict."""
+    """Load model weights from a full trainer checkpoint (EMA when present)."""
     checkpoint = cast(
         dict[str, Any],
         torch.load(path, map_location=map_location, weights_only=True),
     )
-    if "model" not in checkpoint:
-        model.load_state_dict(checkpoint, strict=strict)
-        return
-
     if prefer_ema and "ema_model" in checkpoint:
         ema_state = checkpoint["ema_model"]
         model_state = {

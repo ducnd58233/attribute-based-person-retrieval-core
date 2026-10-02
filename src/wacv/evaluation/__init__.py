@@ -251,47 +251,22 @@ def apply_per_attribute_temperatures(
     return _calibrate_probabilities(probabilities, temperatures)
 
 
-def _attribute_reliability_weights(probabilities: np.ndarray) -> np.ndarray:
-    """Higher weight for peaked, rare-leaning attributes (Specker-style)."""
-    mean = probabilities.mean(axis=0)
-    std = np.maximum(probabilities.std(axis=0), 1e-3)
-    rarity = 1.0 / np.maximum(mean * (1.0 - mean), 1e-3)
-    reliability = rarity / std
-    return (reliability / np.maximum(reliability.mean(), 1e-8)).astype(np.float32)
-
-
 def specker_distance(
     queries: np.ndarray,
     probabilities: np.ndarray,
     *,
     temperature: float = 1.5,
-    attribute_weights: np.ndarray | None = None,
-    use_reliability_weights: bool = False,
 ) -> np.ndarray:
     """Calibrated attribute distance (Specker ICIP 2021 ADAPT).
 
-    Default: temperature-calibrate gallery probabilities, then L1 to binary
-    queries. Optional reliability weights are off by default — on this
-    ConvNeXt baseline they *hurt* val mADM in a controlled sweep.
+    Temperature-calibrate gallery probabilities, then L1 to binary queries.
     """
     calibrated = _calibrate_probabilities(probabilities, temperature)
-    if attribute_weights is not None:
-        weights = attribute_weights.astype(np.float32).ravel()
-    elif use_reliability_weights:
-        weights = _attribute_reliability_weights(calibrated)
-    else:
-        weights = np.ones(calibrated.shape[1], dtype=np.float32)
-    if weights.shape[0] != calibrated.shape[1]:
-        raise ValueError(
-            f"attribute_weights length {weights.shape[0]} != "
-            f"{calibrated.shape[1]} attributes"
-        )
     query_values = queries.astype(np.float32)
-    weighted_queries = query_values * weights[None, :]
     return (
-        weighted_queries.sum(axis=1, keepdims=True)
-        + (calibrated * weights[None, :]).sum(axis=1)[None, :]
-        - 2.0 * weighted_queries @ calibrated.T
+        query_values.sum(axis=1, keepdims=True)
+        + calibrated.sum(axis=1)[None, :]
+        - 2.0 * query_values @ calibrated.T
     )
 
 

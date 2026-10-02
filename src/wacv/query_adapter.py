@@ -160,17 +160,3 @@ class AttributeModelWithHardQuery(nn.Module):
     def query_embeddings(self, queries: torch.Tensor) -> torch.Tensor:
         """Encode binary query vectors into the hard-query embedding space."""
         return self.hard_query_adapter.encode_queries(queries)
-
-
-def attach_hard_query_adapter(
-    backbone: nn.Module,
-    *,
-    num_attributes: int,
-    adapter_dim: int,
-) -> AttributeModelWithHardQuery:
-    """Wrap a classifier backbone with a CLEAR-lite hard-query adapter."""
-    return AttributeModelWithHardQuery(
-        backbone,
-        num_attributes=num_attributes,
-        adapter_dim=adapter_dim,
-    )

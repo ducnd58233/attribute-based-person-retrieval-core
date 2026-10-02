@@ -30,11 +30,6 @@ from src.wacv.models._common import classification_head
 
 DINOV2_HUB_REPO = "facebookresearch/dinov2"
 DINOV2_HUB_ENTRY = "dinov2_vitb14_reg"
-DINOV2_FBAI_WEIGHTS_URL = (
-    "https://dl.fbaipublicfiles.com/dinov2/dinov2_vitb14/"
-    "dinov2_vitb14_reg4_pretrain.pth"
-)
-DINOV2_HF_REPO_ID = "facebook/dinov2-with-registers-base"
 
 _PATCH_SIZE = 14
 _TARGET_H = 252

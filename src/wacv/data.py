@@ -138,20 +138,6 @@ def _train_transform_degrade(
     )
 
 
-IMAGE_TRANSFORM = _eval_transform(
-    DEFAULT_IMAGE_SIZE, mean=_IMAGENET_MEAN, std=_IMAGENET_STD
-)
-TRAIN_TRANSFORM = _train_transform(
-    DEFAULT_IMAGE_SIZE, mean=_IMAGENET_MEAN, std=_IMAGENET_STD
-)
-CLIP_IMAGE_TRANSFORM = _eval_transform(
-    DEFAULT_IMAGE_SIZE, mean=_CLIP_MEAN, std=_CLIP_STD
-)
-CLIP_TRAIN_TRANSFORM = _train_transform(
-    DEFAULT_IMAGE_SIZE, mean=_CLIP_MEAN, std=_CLIP_STD
-)
-
-
 def transforms_for_model(
     model_name: str,
     *,
@@ -271,7 +257,7 @@ class AttributeDataset(Dataset):
         self,
         gt: pd.DataFrame,
         images_root: Path,
-        transform: transforms.Compose = IMAGE_TRANSFORM,
+        transform: transforms.Compose,
         *,
         attribute_names: tuple[str, ...] | None = None,
         query_id_by_image: dict[str, int] | None = None,

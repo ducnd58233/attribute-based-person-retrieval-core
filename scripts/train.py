@@ -84,13 +84,6 @@ def build_loaders(
         image_size=image_size,
         degrade_aug=config.data.degrade_aug,
     )
-    if not config.data.train_augmentation:
-        train_transform = transforms_for_model(
-            config.model.name,
-            train=False,
-            image_size=image_size,
-            degrade_aug=config.data.degrade_aug,
-        )
     eval_transform = transforms_for_model(
         config.model.name, train=False, image_size=image_size
     )
@@ -207,7 +200,7 @@ def maybe_wrap_logit_adjust(
 
     offset = logit_adjustment_offset(prior.to(device))
     LOGGER.info("logit_adjust enabled (train-time prior offset)")
-    return LogitAdjustedLoss(criterion, offset)  # type: ignore[arg-type]
+    return LogitAdjustedLoss(criterion, offset)
 
 
 def _supports_lp_ft(model: torch.nn.Module) -> bool:
