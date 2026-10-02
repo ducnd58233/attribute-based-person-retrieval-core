@@ -42,12 +42,14 @@ def _make_gallery(tmp_path: Path, count: int) -> list[dict[str, object]]:
 
 
 def test_predict_gallery_prints_progress_per_batch(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _load_run_module()
     module._STATE["model"] = _FakeModel()
     module._STATE["device"] = torch.device("cpu")
-    module.BATCH_SIZE = 2
+    monkeypatch.setattr(module, "BATCH_SIZE", 2)
     gallery = _make_gallery(tmp_path, count=5)
 
     module._predict_gallery(gallery)
@@ -59,12 +61,14 @@ def test_predict_gallery_prints_progress_per_batch(
 
 
 def test_predict_gallery_progress_mentions_total(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _load_run_module()
     module._STATE["model"] = _FakeModel()
     module._STATE["device"] = torch.device("cpu")
-    module.BATCH_SIZE = 3
+    monkeypatch.setattr(module, "BATCH_SIZE", 3)
     gallery = _make_gallery(tmp_path, count=3)
 
     module._predict_gallery(gallery)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Protocol, cast
 
 import open_clip
 import torch
@@ -17,6 +18,18 @@ from src.wacv.models._common import (
     set_requires_grad,
 )
 from src.wacv.models.lora import inject_lora_into_linear
+
+
+class _SizedVisual(Protocol):
+    image_size: tuple[int, int]
+
+
+def _resblocks(visual: nn.Module) -> nn.ModuleList | nn.Sequential:
+    """Transformer blocks of an open_clip vision tower."""
+    blocks = visual.get_submodule("transformer.resblocks")
+    if not isinstance(blocks, nn.ModuleList | nn.Sequential):
+        raise TypeError(f"expected a sequence of blocks, got {type(blocks)}")
+    return blocks
 
 
 @dataclass(frozen=True)
@@ -133,8 +146,11 @@ class ClipAttributeClassifier(nn.Module):
         """
         self.freeze_backbone()
         replaced = 0
-        for block in self.visual.transformer.resblocks:
-            inject_lora_into_linear(block.attn.out_proj, rank=rank, alpha=alpha)
+        for block in _resblocks(self.visual):
+            out_proj = block.get_submodule("attn.out_proj")
+            if not isinstance(out_proj, nn.Linear):
+                raise TypeError(f"expected attn.out_proj Linear, got {type(out_proj)}")
+            inject_lora_into_linear(out_proj, rank=rank, alpha=alpha)
             replaced += 1
         return replaced
 
@@ -149,7 +165,7 @@ class ClipAttributeClassifier(nn.Module):
         return build_layerwise_param_groups(
             head=self.head,
             tower=self.visual,
-            blocks=self.visual.transformer.resblocks,
+            blocks=_resblocks(self.visual),
             learning_rate=learning_rate,
             weight_decay=weight_decay,
             layer_decay=layer_decay,
@@ -170,17 +186,17 @@ def build_clip_attribute_classifier(
         tower.arch,
         pretrained=tower.pretrained_tag if pretrained else None,
     )
-    visual = model.visual
+    visual = cast(nn.Module, model.visual)
     if not hasattr(visual, "positional_embedding"):
         raise TypeError(f"{tower.arch} visual has no positional_embedding")
     resized = interpolate_clip_positional_embedding(
-        visual.positional_embedding.data,
+        visual.get_parameter("positional_embedding").data,
         height=tower.image_height,
         width=tower.image_width,
         patch_size=tower.patch_size,
     )
-    visual.positional_embedding = nn.Parameter(resized)
-    visual.image_size = (tower.image_height, tower.image_width)
+    visual.register_parameter("positional_embedding", nn.Parameter(resized))
+    cast(_SizedVisual, visual).image_size = (tower.image_height, tower.image_width)
     with torch.inference_mode():
         probe = torch.zeros(1, 3, tower.image_height, tower.image_width)
         feature_dim = int(visual(probe).shape[-1])

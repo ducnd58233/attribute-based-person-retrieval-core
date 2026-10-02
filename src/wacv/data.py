@@ -41,8 +41,8 @@ class RandomDownscaleUpsample:
         width, height = image.size
         small_w = max(1, int(width * scale))
         small_h = max(1, int(height * scale))
-        reduced = image.resize((small_w, small_h), Image.BILINEAR)
-        return reduced.resize((width, height), Image.BILINEAR)
+        reduced = image.resize((small_w, small_h), Image.Resampling.BILINEAR)
+        return reduced.resize((width, height), Image.Resampling.BILINEAR)
 
 
 class RandomJpegCompression:
@@ -194,7 +194,7 @@ def filter_gt_by_domains(
     unknown = allowed - set(KNOWN_DOMAINS)
     if unknown:
         raise ValueError(f"Unknown train/eval domains: {sorted(unknown)}")
-    mask = gt["image"].map(domain_from_image).isin(allowed)
+    mask = gt["image"].map(domain_from_image).isin(sorted(allowed))
     return gt.loc[mask].reset_index(drop=True)
 
 

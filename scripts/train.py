@@ -16,6 +16,9 @@ if TYPE_CHECKING:
     from src.wacv.config import ExperimentConfig
     from src.wacv.engine import AsmrTrainContext
     from src.wacv.evaluation import RankingEvalData
+    from src.wacv.models.clip import ClipAttributeClassifier
+    from src.wacv.models.dinov2 import Dinov2AttributeClassifier
+    from src.wacv.monitoring.tracking import RunTracker
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -179,21 +182,16 @@ def maybe_wrap_logit_adjust(
     return LogitAdjustedLoss(criterion, offset)
 
 
-def _supports_lp_ft(model: torch.nn.Module) -> bool:
-    from src.wacv.models.clip import ClipAttributeClassifier
-    from src.wacv.models.dinov2 import Dinov2AttributeClassifier
-
-    return isinstance(model, (ClipAttributeClassifier, Dinov2AttributeClassifier))
-
-
 def _run_linear_probe_stage(
     *,
-    model: torch.nn.Module,
+    model: ClipAttributeClassifier | Dinov2AttributeClassifier,
     criterion: torch.nn.Module,
     device: torch.device,
-    tracker,
+    tracker: RunTracker,
     config: ExperimentConfig,
-    fit_data: tuple[DataLoader, DataLoader, RankingEvalData | None, object],
+    fit_data: tuple[
+        DataLoader, DataLoader, RankingEvalData | None, AsmrTrainContext | None
+    ],
 ) -> torch.optim.Optimizer:
     """Stage-1 LP then build the stage-2 AdamW optimizer with layer-wise LR."""
     from src.wacv.engine import Trainer
@@ -253,6 +251,8 @@ def main() -> None:
     from src.wacv.engine import Trainer, resolve_device, seed_everything
     from src.wacv.losses import build_attribute_criterion
     from src.wacv.models import build_model
+    from src.wacv.models.clip import ClipAttributeClassifier
+    from src.wacv.models.dinov2 import Dinov2AttributeClassifier
     from src.wacv.monitoring.tracking import RunTracker
     from src.wacv.utils import configure_default_logging
 
@@ -295,7 +295,9 @@ def main() -> None:
             ranking is not None,
             config.optimization.lp_ft,
         )
-        if config.optimization.lp_ft and _supports_lp_ft(model):
+        if config.optimization.lp_ft and isinstance(
+            model, ClipAttributeClassifier | Dinov2AttributeClassifier
+        ):
             optimizer = _run_linear_probe_stage(
                 model=model,
                 criterion=criterion,

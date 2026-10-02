@@ -24,7 +24,8 @@ from src.wacv.losses import asmr_semantic_margin_loss, hard_query_infonce
 from src.wacv.monitoring.tracking import RunTracker
 from src.wacv.query_adapter import AttributeModelWithHardQuery
 
-BatchIterable = Iterable[tuple[torch.Tensor, torch.Tensor]]
+EvalBatch = tuple[torch.Tensor, torch.Tensor]
+TrainBatch = EvalBatch | tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 
 
 @dataclass(frozen=True)
@@ -183,7 +184,9 @@ class Trainer:
         if self.scaler.get_scale() >= scale_before:
             self.ema_model.update_parameters(self.model)
 
-    def _train_epoch(self, loader: BatchIterable, epoch: int) -> tuple[float, int]:
+    def _train_epoch(
+        self, loader: Iterable[TrainBatch], epoch: int
+    ) -> tuple[float, int]:
         self.model.train()
         total_loss = 0.0
         total_samples = 0
@@ -220,7 +223,7 @@ class Trainer:
             raise ValueError("Training loader is empty")
         return total_loss / total_samples, global_step_delta
 
-    def _validate_epoch(self, loader: BatchIterable, epoch: int) -> float:
+    def _validate_epoch(self, loader: Iterable[EvalBatch], epoch: int) -> float:
         self.ema_model.eval()
         total_loss = 0.0
         total_samples = 0
@@ -294,8 +297,8 @@ class Trainer:
 
     def fit(
         self,
-        train_loader: BatchIterable,
-        val_loader: BatchIterable,
+        train_loader: Iterable[TrainBatch],
+        val_loader: Iterable[EvalBatch],
         *,
         ranking: RankingEvalData | None = None,
     ) -> FitResult:

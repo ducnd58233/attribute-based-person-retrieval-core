@@ -8,7 +8,7 @@ import shutil
 import sys
 import zipfile
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import torch
 
@@ -88,7 +88,7 @@ def _export_weights(
         model.eval()
         example = torch.zeros(1, 3, image_h, image_w)
         with torch.inference_mode():
-            traced = torch.jit.trace(model, example)
+            traced = cast(torch.jit.ScriptModule, torch.jit.trace(model, example))
         traced.save(str(destination))
         weight_format = "torchscript"
     else:

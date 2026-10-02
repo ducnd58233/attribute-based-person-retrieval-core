@@ -14,7 +14,7 @@ comes from torch.hub at the pinned commit ``DINOV2_HUB_COMMIT``:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import cast
+from typing import Protocol, cast
 
 import torch
 from torch import nn
@@ -35,7 +35,10 @@ DINOV2_HUB_ENTRY = "dinov2_vitb14_reg"
 
 _PATCH_SIZE = 14
 _TARGET_H, _TARGET_W = MODEL_NATIVE_IMAGE_SIZE["dinov2_vitb14_reg"]
-_FEATURE_DIM = 768
+
+
+class _HasEmbedDim(Protocol):
+    embed_dim: int
 
 
 class Dinov2AttributeClassifier(nn.Module):
@@ -73,6 +76,12 @@ class Dinov2AttributeClassifier(nn.Module):
         """Unfreeze the vision tower (full fine-tune stage)."""
         set_requires_grad(self.backbone, True)
 
+    def _blocks(self) -> nn.ModuleList:
+        blocks = self.backbone.get_submodule("blocks")
+        if not isinstance(blocks, nn.ModuleList):
+            raise TypeError(f"expected ModuleList of blocks, got {type(blocks)}")
+        return blocks
+
     def layerwise_param_groups(
         self,
         *,
@@ -84,7 +93,7 @@ class Dinov2AttributeClassifier(nn.Module):
         return build_layerwise_param_groups(
             head=self.head,
             tower=self.backbone,
-            blocks=self.backbone.blocks,
+            blocks=self._blocks(),
             learning_rate=learning_rate,
             weight_decay=weight_decay,
             layer_decay=layer_decay,
@@ -147,7 +156,7 @@ def build_dinov2_vitb14_reg(
     backbone = load_dinov2_vitb14_reg_backbone(
         pretrained=pretrained, weights_path=weights_path
     )
-    feature_dim = int(getattr(backbone, "embed_dim", _FEATURE_DIM))
+    feature_dim = int(cast(_HasEmbedDim, backbone).embed_dim)
     head = classification_head(feature_dim, num_attributes, dropout)
     return Dinov2AttributeClassifier(
         backbone,

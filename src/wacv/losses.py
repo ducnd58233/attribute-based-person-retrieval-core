@@ -126,6 +126,8 @@ class LogitAdjustedLoss(nn.Module):
     At evaluation the model emits raw logits (neutral prior), matching H10.
     """
 
+    offset: torch.Tensor
+
     def __init__(self, base: nn.Module, offset: torch.Tensor) -> None:
         super().__init__()
         self.base = base
