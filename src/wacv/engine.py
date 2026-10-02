@@ -21,7 +21,7 @@ from tqdm.contrib.logging import logging_redirect_tqdm
 from src.wacv.checkpoint import CheckpointManager
 from src.wacv.config import DeviceName, ExperimentConfig
 from src.wacv.evaluation import compute_ranking_metrics
-from src.wacv.losses import hard_query_infonce
+from src.wacv.losses import asmr_semantic_margin_loss, hard_query_infonce
 from src.wacv.monitoring.tracking import RunTracker
 from src.wacv.query_adapter import AttributeModelWithHardQuery
 
@@ -43,6 +43,13 @@ class RankingEvalData:
     queries: np.ndarray
     gallery_attrs: np.ndarray
     gallery_loader: BatchIterable
+
+
+@dataclass(frozen=True)
+class AsmrTrainContext:
+    """Task-2 train query vectors indexed by ids.csv (train split only)."""
+
+    train_query_vectors: torch.Tensor
 
 
 def resolve_device(requested: DeviceName) -> torch.device:
@@ -91,6 +98,7 @@ class Trainer:
         device: torch.device,
         tracker: RunTracker,
         config: ExperimentConfig,
+        asmr_context: AsmrTrainContext | None = None,
     ) -> None:
         self.model = model
         self.optimizer = optimizer
@@ -99,6 +107,9 @@ class Trainer:
         self.device = device
         self.tracker = tracker
         self.config = config
+        self._asmr_context = asmr_context
+        if config.losses.asmr_aux.weight > 0.0 and asmr_context is None:
+            raise ValueError("losses.asmr_aux requires AsmrTrainContext")
         amp_enabled = config.optimization.amp and device.type == "cuda"
         self.scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
         self.ema_model = AveragedModel(
@@ -110,24 +121,63 @@ class Trainer:
             model, optimizer, scheduler, self.scaler, self.ema_model, config
         )
 
+    def _asmr_aux_loss(
+        self,
+        root: AttributeModelWithHardQuery,
+        batch_images: torch.Tensor,
+        batch_query_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        if self._asmr_context is None:
+            raise RuntimeError("ASMR context missing")
+        valid = batch_query_ids >= 0
+        if not bool(valid.any()):
+            return batch_images.new_zeros(())
+        images = batch_images[valid]
+        query_ids = batch_query_ids[valid]
+        train_queries = self._asmr_context.train_query_vectors
+        unique_ids, inverse = torch.unique(query_ids, sorted=True, return_inverse=True)
+        # train_query_vectors stay on CPU; index_select requires matching devices.
+        query_bits = train_queries.index_select(
+            0, unique_ids.to(device=train_queries.device)
+        ).to(device=images.device, dtype=torch.float32)
+        adapter = root.hard_query_adapter
+        margins = adapter.semantic_margin_matrix(query_bits)
+        gallery_emb = root.gallery_embeddings(images)
+        query_emb = root.query_embeddings(query_bits)
+        return asmr_semantic_margin_loss(gallery_emb, query_emb, inverse, margins)
+
     def _batch_training_loss(
-        self, batch_images: torch.Tensor, batch_targets: torch.Tensor
+        self,
+        batch_images: torch.Tensor,
+        batch_targets: torch.Tensor,
+        batch_query_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         smoothing = self.config.optimization.label_smoothing
         loss_targets = batch_targets * (1.0 - smoothing) + 0.5 * smoothing
         logits = self.model(batch_images)
         loss = self.criterion(logits, loss_targets)
-        match_weight = self.config.optimization.query_match_weight
-        if match_weight <= 0.0:
-            return loss
         root = self.model
-        if not isinstance(root, AttributeModelWithHardQuery):
-            raise TypeError("query_match_weight > 0 requires hard_query_adapter")
-        return loss + match_weight * hard_query_infonce(
-            root.gallery_embeddings(batch_images),
-            root.query_embeddings(batch_targets),
-            temperature=self.config.optimization.query_match_temperature,
-        )
+        match_weight = self.config.optimization.query_match_weight
+        if match_weight > 0.0:
+            if not isinstance(root, AttributeModelWithHardQuery):
+                raise TypeError("query_match_weight > 0 requires hard_query_adapter")
+            loss = loss + match_weight * hard_query_infonce(
+                root.gallery_embeddings(batch_images),
+                root.query_embeddings(batch_targets),
+                temperature=self.config.optimization.query_match_temperature,
+            )
+        asmr_weight = self.config.losses.asmr_aux.weight
+        if asmr_weight > 0.0:
+            if batch_query_ids is None:
+                raise ValueError(
+                    "ASMR aux requires batch query_id from task2 train ids"
+                )
+            if not isinstance(root, AttributeModelWithHardQuery):
+                raise TypeError("losses.asmr_aux requires hard_query_adapter")
+            loss = loss + asmr_weight * self._asmr_aux_loss(
+                root, batch_images, batch_query_ids
+            )
+        return loss
 
     def _step_optimizer(self, loss: torch.Tensor, *, use_amp: bool) -> None:
         if use_amp:
@@ -164,12 +214,20 @@ class Trainer:
         )
         use_amp = self.scaler.is_enabled()
         autocast_type = "cuda" if use_amp else "cpu"
-        for images, targets in batches:
+        for batch in batches:
+            batch_query_ids: torch.Tensor | None = None
+            if len(batch) == 3:
+                images, targets, query_ids = batch
+                batch_query_ids = query_ids.to(self.device, non_blocking=True)
+            else:
+                images, targets = batch
             batch_images = images.to(self.device, non_blocking=True)
             batch_targets = targets.to(self.device, non_blocking=True)
             self.optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type=autocast_type, enabled=use_amp):
-                loss = self._batch_training_loss(batch_images, batch_targets)
+                loss = self._batch_training_loss(
+                    batch_images, batch_targets, batch_query_ids
+                )
             self._step_optimizer(loss, use_amp=use_amp)
             batch_size = batch_targets.shape[0]
             total_loss += loss.detach().item() * batch_size

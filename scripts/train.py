@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 
 if TYPE_CHECKING:
     from src.wacv.config import ExperimentConfig
-    from src.wacv.engine import RankingEvalData
+    from src.wacv.engine import AsmrTrainContext, RankingEvalData
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -33,8 +33,26 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def build_asmr_supervision(
+    config: ExperimentConfig,
+) -> tuple[dict[str, int] | None, AsmrTrainContext | None]:
+    from src.wacv.data import load_task2_train_query_supervision
+    from src.wacv.engine import AsmrTrainContext
+
+    if config.losses.asmr_aux.weight <= 0.0:
+        return None, None
+    mapping, queries = load_task2_train_query_supervision(config.data.root)
+    context = AsmrTrainContext(
+        train_query_vectors=torch.from_numpy(queries.astype("float32"))
+    )
+    return mapping, context
+
+
 def build_loaders(
-    config: ExperimentConfig, device: torch.device
+    config: ExperimentConfig,
+    device: torch.device,
+    *,
+    query_id_by_image: dict[str, int] | None = None,
 ) -> tuple[DataLoader, DataLoader, torch.Tensor, torch.Tensor, int]:
     from src.wacv.attributes import attribute_names_from_columns
     from src.wacv.data import (
@@ -64,16 +82,24 @@ def build_loaders(
         config.model.name,
         train=config.data.train_augmentation,
         image_size=image_size,
+        degrade_aug=config.data.degrade_aug,
     )
     if not config.data.train_augmentation:
         train_transform = transforms_for_model(
-            config.model.name, train=False, image_size=image_size
+            config.model.name,
+            train=False,
+            image_size=image_size,
+            degrade_aug=config.data.degrade_aug,
         )
     eval_transform = transforms_for_model(
         config.model.name, train=False, image_size=image_size
     )
     train_dataset = AttributeDataset(
-        train_gt, config.data.root, train_transform, attribute_names=attribute_names
+        train_gt,
+        config.data.root,
+        train_transform,
+        attribute_names=attribute_names,
+        query_id_by_image=query_id_by_image,
     )
     val_dataset = AttributeDataset(
         val_gt, config.data.root, eval_transform, attribute_names=attribute_names
@@ -170,12 +196,11 @@ def build_ranking_eval(
 
 
 def maybe_wrap_logit_adjust(
-    criterion: object,
+    criterion: torch.nn.Module,
     config: ExperimentConfig,
     prior: torch.Tensor,
     device: torch.device,
-) -> object:
-    """Optionally wrap the attribute criterion with a train-time prior offset."""
+) -> torch.nn.Module:
     if not config.optimization.logit_adjust:
         return criterion
     from src.wacv.losses import LogitAdjustedLoss, logit_adjustment_offset
@@ -185,13 +210,80 @@ def maybe_wrap_logit_adjust(
     return LogitAdjustedLoss(criterion, offset)  # type: ignore[arg-type]
 
 
+def _supports_lp_ft(model: torch.nn.Module) -> bool:
+    from src.wacv.models.clip import ClipAttributeClassifier
+    from src.wacv.models.dinov2 import Dinov2AttributeClassifier
+
+    return isinstance(model, (ClipAttributeClassifier, Dinov2AttributeClassifier))
+
+
+def _run_linear_probe_stage(
+    *,
+    model: torch.nn.Module,
+    criterion: torch.nn.Module,
+    device: torch.device,
+    tracker,
+    config: ExperimentConfig,
+    fit_data: tuple[DataLoader, DataLoader, RankingEvalData | None, object],
+) -> torch.optim.Optimizer:
+    """Stage-1 LP then build the stage-2 AdamW optimizer with layer-wise LR."""
+    from src.wacv.engine import Trainer
+
+    train_loader, val_loader, ranking, asmr_context = fit_data
+    model.freeze_backbone()
+    lp_config = config.model_copy(
+        update={
+            "optimization": config.optimization.model_copy(
+                update={"epochs": config.optimization.lp_epochs}
+            )
+        }
+    )
+    lp_optimizer = torch.optim.AdamW(
+        (p for p in model.parameters() if p.requires_grad),
+        lr=config.optimization.lp_learning_rate,
+        weight_decay=config.optimization.weight_decay,
+    )
+    lp_scheduler = ReduceLROnPlateau(
+        lp_optimizer,
+        factor=config.optimization.scheduler_factor,
+        patience=config.optimization.scheduler_patience,
+    )
+    tracker.logger.info(
+        "LP-FT stage 1: linear probe epochs=%d lr=%s",
+        config.optimization.lp_epochs,
+        config.optimization.lp_learning_rate,
+    )
+    Trainer(
+        model,
+        lp_optimizer,
+        lp_scheduler,
+        criterion,
+        device,
+        tracker,
+        lp_config,
+        asmr_context=asmr_context,
+    ).fit(train_loader, val_loader, ranking=ranking)
+    model.unfreeze_backbone()
+    ft_groups = model.layerwise_param_groups(
+        learning_rate=config.optimization.learning_rate,
+        weight_decay=config.optimization.weight_decay,
+        layer_decay=config.optimization.layer_decay,
+    )
+    tracker.logger.info(
+        "LP-FT stage 2: full FT epochs=%d base_lr=%s layer_decay=%s",
+        config.optimization.epochs,
+        config.optimization.learning_rate,
+        config.optimization.layer_decay,
+    )
+    return torch.optim.AdamW(ft_groups)
+
+
 def main() -> None:
     from src.wacv.checkpoint import load_model_weights
     from src.wacv.config import load_config
     from src.wacv.engine import Trainer, resolve_device, seed_everything
     from src.wacv.losses import build_attribute_criterion
     from src.wacv.models import build_model
-    from src.wacv.models.clip import ClipAttributeClassifier
     from src.wacv.monitoring.tracking import RunTracker
     from src.wacv.utils import configure_default_logging
 
@@ -204,8 +296,9 @@ def main() -> None:
             "no CUDA available; training on CPU (slow for ConvNeXt). "
             "On Colab: Runtime → Change runtime type → GPU."
         )
+    query_id_by_image, asmr_context = build_asmr_supervision(config)
     train_loader, val_loader, pos_weight, prior, num_attributes = build_loaders(
-        config, device
+        config, device, query_id_by_image=query_id_by_image
     )
     ranking = build_ranking_eval(config, device)
 
@@ -233,45 +326,14 @@ def main() -> None:
             ranking is not None,
             config.optimization.lp_ft,
         )
-        if config.optimization.lp_ft and isinstance(model, ClipAttributeClassifier):
-            model.freeze_backbone()
-            lp_config = config.model_copy(
-                update={
-                    "optimization": config.optimization.model_copy(
-                        update={"epochs": config.optimization.lp_epochs}
-                    )
-                }
-            )
-            lp_optimizer = torch.optim.AdamW(
-                (p for p in model.parameters() if p.requires_grad),
-                lr=config.optimization.lp_learning_rate,
-                weight_decay=config.optimization.weight_decay,
-            )
-            lp_scheduler = ReduceLROnPlateau(
-                lp_optimizer,
-                factor=config.optimization.scheduler_factor,
-                patience=config.optimization.scheduler_patience,
-            )
-            tracker.logger.info(
-                "LP-FT stage 1: linear probe epochs=%d lr=%s",
-                config.optimization.lp_epochs,
-                config.optimization.lp_learning_rate,
-            )
-            Trainer(
-                model, lp_optimizer, lp_scheduler, criterion, device, tracker, lp_config
-            ).fit(train_loader, val_loader, ranking=ranking)
-            model.unfreeze_backbone()
-            ft_groups = model.layerwise_param_groups(
-                learning_rate=config.optimization.learning_rate,
-                weight_decay=config.optimization.weight_decay,
-                layer_decay=config.optimization.layer_decay,
-            )
-            optimizer = torch.optim.AdamW(ft_groups)
-            tracker.logger.info(
-                "LP-FT stage 2: full FT epochs=%d base_lr=%s layer_decay=%s",
-                config.optimization.epochs,
-                config.optimization.learning_rate,
-                config.optimization.layer_decay,
+        if config.optimization.lp_ft and _supports_lp_ft(model):
+            optimizer = _run_linear_probe_stage(
+                model=model,
+                criterion=criterion,
+                device=device,
+                tracker=tracker,
+                config=config,
+                fit_data=(train_loader, val_loader, ranking, asmr_context),
             )
         else:
             optimizer = torch.optim.AdamW(
@@ -285,7 +347,14 @@ def main() -> None:
             patience=config.optimization.scheduler_patience,
         )
         result = Trainer(
-            model, optimizer, scheduler, criterion, device, tracker, config
+            model,
+            optimizer,
+            scheduler,
+            criterion,
+            device,
+            tracker,
+            config,
+            asmr_context=asmr_context,
         ).fit(train_loader, val_loader, ranking=ranking)
         tracker.logger.info(
             "finished start_epoch=%d end_epoch=%d global_step=%d best_val_loss=%.6f",
