@@ -12,9 +12,7 @@ from torch import nn
 from torch.utils.data import DataLoader, Subset
 
 from src.wacv.data import AttributeDataset
-
-IMAGENET_MEAN: tuple[float, float, float] = (0.485, 0.456, 0.406)
-IMAGENET_STD: tuple[float, float, float] = (0.229, 0.224, 0.225)
+from src.wacv.normalization import NormalizationStats
 
 
 @dataclass(frozen=True)
@@ -30,10 +28,10 @@ class SampleComparison:
     false_negatives: tuple[str, ...]
 
 
-def tensor_to_display_rgb(image: torch.Tensor) -> np.ndarray:
-    """Undo ImageNet normalize and return an HxWx3 float array in [0, 1]."""
-    mean = np.asarray(IMAGENET_MEAN, dtype=np.float32)[:, None, None]
-    std = np.asarray(IMAGENET_STD, dtype=np.float32)[:, None, None]
+def tensor_to_display_rgb(image: torch.Tensor, stats: NormalizationStats) -> np.ndarray:
+    """Undo ``stats`` normalisation; return an HxWx3 float array in [0, 1]."""
+    mean = np.asarray(stats.mean, dtype=np.float32)[:, None, None]
+    std = np.asarray(stats.std, dtype=np.float32)[:, None, None]
     rgb = (image.detach().cpu().numpy() * std + mean).clip(0.0, 1.0)
     return np.transpose(rgb, (1, 2, 0))
 
@@ -54,6 +52,7 @@ def compare_sample(
     targets: np.ndarray,
     probabilities: np.ndarray,
     attribute_names: tuple[str, ...],
+    stats: NormalizationStats,
     threshold: float = 0.5,
 ) -> SampleComparison:
     """Build a label-vs-prediction comparison for a single sample."""
@@ -62,7 +61,7 @@ def compare_sample(
     pred_set = set(positive_names(predicted, attribute_names))
     return SampleComparison(
         image_relpath=image_relpath,
-        rgb=tensor_to_display_rgb(image),
+        rgb=tensor_to_display_rgb(image, stats),
         label_positives=tuple(sorted(label_set)),
         pred_positives=tuple(sorted(pred_set)),
         true_positives=tuple(sorted(label_set & pred_set)),
@@ -78,6 +77,7 @@ def collect_comparisons(
     device: torch.device,
     *,
     limit: int,
+    stats: NormalizationStats,
     threshold: float = 0.5,
 ) -> list[SampleComparison]:
     """Run the model on the first ``limit`` dataset rows and compare to labels."""
@@ -109,6 +109,7 @@ def collect_comparisons(
                         targets=targets[row],
                         probabilities=probs[row],
                         attribute_names=dataset.attribute_names,
+                        stats=stats,
                         threshold=threshold,
                     )
                 )

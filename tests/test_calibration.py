@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from src.wacv.evaluation import (
-    apply_per_attribute_temperatures,
+    calibrate_probabilities,
     fit_per_attribute_temperatures,
     nll_distance,
 )
@@ -24,7 +24,7 @@ def test_apply_matches_scalar_broadcast() -> None:
     rng = np.random.default_rng(1)
     probs = rng.random((10, 5), dtype=np.float32) * 0.8 + 0.1
     temps = np.full(5, 2.0, dtype=np.float32)
-    via_vec = apply_per_attribute_temperatures(probs, temps)
+    via_vec = calibrate_probabilities(probs, temps)
     # Scalar path through nll's calibrate: distance with T=2 on raw probs
     # should match nll on vector-calibrated probs at T=1
     d_scalar = nll_distance(np.ones((2, 5), dtype=np.float32), probs, temperature=2.0)
@@ -44,6 +44,6 @@ def test_submission_apply_matches_library() -> None:
     rng = np.random.default_rng(2)
     probs = rng.random((4, 6), dtype=np.float32) * 0.8 + 0.1
     temps = np.array([0.8, 1.0, 1.2, 1.5, 2.0, 0.5], dtype=np.float32)
-    lib = apply_per_attribute_temperatures(probs, temps)
+    lib = calibrate_probabilities(probs, temps)
     sub = mod._apply_per_attribute_temperatures(probs, temps)
     np.testing.assert_allclose(sub, lib, rtol=1e-5, atol=1e-5)

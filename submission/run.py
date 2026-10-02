@@ -55,6 +55,24 @@ class _HasFc(Protocol):
     fc: nn.Module
 
 
+class _ConvNeXtLike(Protocol):
+    features: nn.Module
+    avgpool: nn.Module
+    classifier: nn.Sequential
+
+
+class _ResNetLike(Protocol):
+    conv1: nn.Module
+    bn1: nn.Module
+    relu: nn.Module
+    maxpool: nn.Module
+    layer1: nn.Module
+    layer2: nn.Module
+    layer3: nn.Module
+    layer4: nn.Module
+    avgpool: nn.Module
+
+
 def _classification_head(
     in_features: int, num_attributes: int, dropout: float
 ) -> nn.Module:
@@ -108,19 +126,21 @@ class _AttributeModelWithHardQuery(nn.Module):
 
     def gallery_embeddings(self, images: torch.Tensor) -> torch.Tensor:
         if hasattr(self.backbone, "features") and hasattr(self.backbone, "avgpool"):
-            features = self.backbone.features(images)
-            pooled = self.backbone.avgpool(features)
+            convnext = cast(_ConvNeXtLike, self.backbone)
+            features = convnext.features(images)
+            pooled = convnext.avgpool(features)
             pooled = torch.flatten(pooled, 1)
         else:
-            features = self.backbone.conv1(images)
-            features = self.backbone.bn1(features)
-            features = self.backbone.relu(features)
-            features = self.backbone.maxpool(features)
-            features = self.backbone.layer1(features)
-            features = self.backbone.layer2(features)
-            features = self.backbone.layer3(features)
-            features = self.backbone.layer4(features)
-            pooled = torch.flatten(self.backbone.avgpool(features), 1)
+            resnet = cast(_ResNetLike, self.backbone)
+            features = resnet.conv1(images)
+            features = resnet.bn1(features)
+            features = resnet.relu(features)
+            features = resnet.maxpool(features)
+            features = resnet.layer1(features)
+            features = resnet.layer2(features)
+            features = resnet.layer3(features)
+            features = resnet.layer4(features)
+            pooled = torch.flatten(resnet.avgpool(features), 1)
         return self.hard_query_adapter.encode_gallery_features(pooled)
 
     def query_embeddings(self, queries: torch.Tensor) -> torch.Tensor:
@@ -129,7 +149,7 @@ class _AttributeModelWithHardQuery(nn.Module):
 
 def _feature_dim(backbone: nn.Module) -> int:
     if hasattr(backbone, "classifier"):
-        head = backbone.classifier[-1]
+        head = cast(_ConvNeXtLike, backbone).classifier[-1]
         if isinstance(head, nn.Sequential):
             for module in reversed(list(head.children())):
                 if isinstance(module, nn.Linear):

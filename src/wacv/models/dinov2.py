@@ -1,45 +1,44 @@
 """DINOv2 ViT-B/14 with registers as an attribute classifier (252x126 LP-FT).
 
-Weight loading (do not commit checkpoints into git):
+Weight loading (do not commit checkpoints into git). The architecture always
+comes from torch.hub at the pinned commit ``DINOV2_HUB_COMMIT``:
 
-1. **torch.hub (default when ``pretrained=True`` and no ``weights_path``)**
-   ``torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14_reg")``
-   pulls architecture +
-   ``dinov2_vitb14_reg4_pretrain.pth`` from
-   ``https://dl.fbaipublicfiles.com/dinov2/dinov2_vitb14/``.
+1. **Hub weights (``pretrained=True`` and no ``weights_path``)**: the hub entry
+   also downloads the official ``dinov2_vitb14_reg4_pretrain.pth``.
 
-2. **Local / vendored path (``model.weights_path``)**
-   Architecture still comes from torch.hub with ``pretrained=False`` (use a
-   pre-populated ``$TORCH_HOME/hub`` cache offline). Then
-   ``load_state_dict`` from the local ``.pth`` — the path to vendor into a
-   training sandbox or later Codabench zip packaging.
-
-3. **Hugging Face (manual convert)**
-   ``facebook/dinov2-with-registers-base`` — not loaded automatically; export
-   a torch.hub-compatible state_dict if you prefer HF as the download source.
+2. **Local / vendored path (``model.weights_path``)**: hub is called with
+   ``pretrained=False`` (use a pre-populated ``$TORCH_HOME/hub`` cache offline),
+   then ``load_state_dict`` reads the local ``.pth``.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Protocol, cast
 
 import torch
 from torch import nn
 
-from src.wacv.models._common import classification_head
+from src.wacv.config import MODEL_NATIVE_IMAGE_SIZE
+from src.wacv.models._common import (
+    build_layerwise_param_groups,
+    classification_head,
+    set_requires_grad,
+)
 
 DINOV2_HUB_REPO = "facebookresearch/dinov2"
+# Immutable upstream commit (main on 2026-06-03, "Safely load weights from
+# specified URLs (#598)"). Pinned so training never runs whatever code the
+# default branch holds on the day it is launched.
+DINOV2_HUB_COMMIT = "7764ea0f912e53c92e82eb78a2a1631e92725fc8"
 DINOV2_HUB_ENTRY = "dinov2_vitb14_reg"
-DINOV2_FBAI_WEIGHTS_URL = (
-    "https://dl.fbaipublicfiles.com/dinov2/dinov2_vitb14/"
-    "dinov2_vitb14_reg4_pretrain.pth"
-)
-DINOV2_HF_REPO_ID = "facebook/dinov2-with-registers-base"
 
 _PATCH_SIZE = 14
-_TARGET_H = 252
-_TARGET_W = 126
-_FEATURE_DIM = 768
+_TARGET_H, _TARGET_W = MODEL_NATIVE_IMAGE_SIZE["dinov2_vitb14_reg"]
+
+
+class _HasEmbedDim(Protocol):
+    embed_dim: int
 
 
 class Dinov2AttributeClassifier(nn.Module):
@@ -71,13 +70,17 @@ class Dinov2AttributeClassifier(nn.Module):
 
     def freeze_backbone(self) -> None:
         """Freeze the vision tower (linear-probe stage)."""
-        for parameter in self.backbone.parameters():
-            parameter.requires_grad = False
+        set_requires_grad(self.backbone, False)
 
     def unfreeze_backbone(self) -> None:
         """Unfreeze the vision tower (full fine-tune stage)."""
-        for parameter in self.backbone.parameters():
-            parameter.requires_grad = True
+        set_requires_grad(self.backbone, True)
+
+    def _blocks(self) -> nn.ModuleList:
+        blocks = self.backbone.get_submodule("blocks")
+        if not isinstance(blocks, nn.ModuleList):
+            raise TypeError(f"expected ModuleList of blocks, got {type(blocks)}")
+        return blocks
 
     def layerwise_param_groups(
         self,
@@ -87,51 +90,14 @@ class Dinov2AttributeClassifier(nn.Module):
         layer_decay: float,
     ) -> list[dict[str, object]]:
         """AdamW param groups with deeper ViT blocks keeping higher LR."""
-        blocks = list(self.backbone.blocks)
-        num_layers = len(blocks)
-        layer_id_by_param: dict[int, int] = {}
-        for index, block in enumerate(blocks):
-            for parameter in block.parameters():
-                layer_id_by_param[id(parameter)] = index
-        groups: list[dict[str, object]] = []
-        head_params = [p for p in self.head.parameters() if p.requires_grad]
-        if head_params:
-            groups.append(
-                {
-                    "params": head_params,
-                    "lr": learning_rate,
-                    "weight_decay": weight_decay,
-                }
-            )
-        early_params: list[nn.Parameter] = []
-        for _name, parameter in self.backbone.named_parameters():
-            if not parameter.requires_grad:
-                continue
-            if id(parameter) in layer_id_by_param:
-                continue
-            early_params.append(parameter)
-        if early_params:
-            scale = layer_decay**num_layers
-            groups.append(
-                {
-                    "params": early_params,
-                    "lr": learning_rate * scale,
-                    "weight_decay": weight_decay,
-                }
-            )
-        for index, block in enumerate(blocks):
-            params = [p for p in block.parameters() if p.requires_grad]
-            if not params:
-                continue
-            scale = layer_decay ** (num_layers - 1 - index)
-            groups.append(
-                {
-                    "params": params,
-                    "lr": learning_rate * scale,
-                    "weight_decay": weight_decay,
-                }
-            )
-        return groups
+        return build_layerwise_param_groups(
+            head=self.head,
+            tower=self.backbone,
+            blocks=self._blocks(),
+            learning_rate=learning_rate,
+            weight_decay=weight_decay,
+            layer_decay=layer_decay,
+        )
 
 
 def load_dinov2_vitb14_reg_backbone(
@@ -147,10 +113,11 @@ def load_dinov2_vitb14_reg_backbone(
     """
     load_pretrained = bool(pretrained) and weights_path is None
     backbone = torch.hub.load(
-        DINOV2_HUB_REPO,
+        f"{DINOV2_HUB_REPO}:{DINOV2_HUB_COMMIT}",
         DINOV2_HUB_ENTRY,
         pretrained=load_pretrained,
-        trust_repo=True,
+        # torch accepts a bool here; its type stub declares ``str``.
+        trust_repo=cast("str", True),
     )
     if not isinstance(backbone, nn.Module):
         raise TypeError(f"unexpected DINOv2 hub return type: {type(backbone)!r}")
@@ -189,7 +156,7 @@ def build_dinov2_vitb14_reg(
     backbone = load_dinov2_vitb14_reg_backbone(
         pretrained=pretrained, weights_path=weights_path
     )
-    feature_dim = int(getattr(backbone, "embed_dim", _FEATURE_DIM))
+    feature_dim = int(cast(_HasEmbedDim, backbone).embed_dim)
     head = classification_head(feature_dim, num_attributes, dropout)
     return Dinov2AttributeClassifier(
         backbone,

@@ -34,8 +34,6 @@ import yaml
 ROOT: Final[Path] = Path(__file__).resolve().parents[1]
 DEFAULT_OUT: Final[Path] = ROOT / "notebooks" / "train_pipeline.ipynb"
 DEFAULT_CONFIG: Final[Path] = Path("configs/convnext_baseline.yml")
-LEGACY_PIPELINE_PY: Final[Path] = ROOT / "notebooks" / "train_pipeline.py"
-LEGACY_EXPORTER: Final[Path] = ROOT / "scripts" / "export_colab_notebook.py"
 SRC_PREFIX: Final[str] = "src.wacv"
 
 
@@ -363,7 +361,7 @@ def persist_checkpoints_cell(
             "\n"
             "copied: list[Path] = []\n"
             "try:\n"
-            "    from google.colab import drive  # type: ignore[import-not-found]\n"
+            "    from google.colab import drive\n"
             "\n"
             "    drive.mount('/content/drive')\n"
             "    drive_root = Path('/content/drive/MyDrive/wacv-upar-checkpoints')\n"
@@ -390,7 +388,7 @@ def persist_checkpoints_cell(
             "    print('Bundled into', archive)\n"
             "\n"
             "try:\n"
-            "    from google.colab import files  # type: ignore[import-not-found]\n"
+            "    from google.colab import files\n"
             "\n"
             "    if archive is not None:\n"
             "        print('Downloading', archive)\n"
@@ -664,12 +662,6 @@ def main() -> None:
     args = parse_args()
     out = resolve_notebook_out(out=args.out, name=args.name)
     config_rel = config_relpath(args.config, ROOT)
-    if LEGACY_PIPELINE_PY.is_file():
-        LEGACY_PIPELINE_PY.unlink()
-        print(f"removed legacy duplicate {LEGACY_PIPELINE_PY}")
-    if LEGACY_EXPORTER.is_file():
-        LEGACY_EXPORTER.unlink()
-        print(f"removed legacy exporter {LEGACY_EXPORTER}")
     write_notebook(out, config_rel=config_rel)
 
 

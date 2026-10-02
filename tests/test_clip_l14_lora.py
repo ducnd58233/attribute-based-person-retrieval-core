@@ -25,6 +25,7 @@ def test_clip_l14_transforms_are_224x112() -> None:
     tensor = transforms_for_model("clip_vit_l14", train=False, image_size=(224, 112))(
         image
     )
+    assert isinstance(tensor, torch.Tensor)
     assert tuple(tensor.shape) == (3, 224, 112)
 
 
@@ -43,4 +44,4 @@ def test_lora_parametrization_keeps_weight_attr_and_starts_as_base() -> None:
         p for n, p in base.named_parameters() if "lora_" in n and p.requires_grad
     ]
     assert lora_params
-    assert not base.parametrizations.weight.original.requires_grad
+    assert not base.get_parameter("parametrizations.weight.original").requires_grad

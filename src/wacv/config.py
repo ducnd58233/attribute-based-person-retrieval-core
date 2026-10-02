@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
-from typing import Annotated, Literal, Self
+from typing import Annotated, Literal, Self, get_args
 
 import yaml
 from pydantic import (
@@ -17,9 +16,7 @@ from pydantic import (
 )
 from pydantic.types import NonNegativeInt, PositiveInt
 
-# Shared across git worktrees; see AGENTS.md "Experiment worktrees: shared data".
-DATA_ROOT_ENV = "WACV_DATA_ROOT"
-MAIN_CHECKOUT_DIRNAME = "attribute-based-person-retrieval-core"
+from src.wacv.data_root import resolve_data_root
 
 ModelName = Literal[
     "resnet50",
@@ -38,6 +35,7 @@ CalibrationMode = Literal["none", "per_attribute"]
 QueryNorm = Literal["none", "dual_softmax"]
 TTAView = Literal["identity", "hflip", "scale_crop"]
 DomainName = Literal["PA100k", "PETA", "Market1501"]
+KNOWN_DOMAINS: tuple[str, ...] = get_args(DomainName)
 EvalProtocol = Literal["id_val", "lodo_m"]
 
 
@@ -48,18 +46,6 @@ def _path_from_yaml(value: object) -> object:
 ConfigPath = Annotated[Path, BeforeValidator(_path_from_yaml)]
 
 
-def _image_size_from_yaml(value: object) -> object:
-    """Accept YAML lists as (H, W) tuples."""
-    if isinstance(value, list) and len(value) == 2:
-        return (value[0], value[1])
-    return value
-
-
-ImageSize = Annotated[
-    tuple[PositiveInt, PositiveInt], BeforeValidator(_image_size_from_yaml)
-]
-
-
 def _pair_from_yaml(value: object) -> object:
     """Accept YAML length-2 lists as pairs."""
     if isinstance(value, list) and len(value) == 2:
@@ -67,10 +53,23 @@ def _pair_from_yaml(value: object) -> object:
     return value
 
 
+ImageSize = Annotated[tuple[PositiveInt, PositiveInt], BeforeValidator(_pair_from_yaml)]
 FloatPair = Annotated[tuple[float, float], BeforeValidator(_pair_from_yaml)]
 JpegQualityRange = Annotated[
     tuple[PositiveInt, PositiveInt], BeforeValidator(_pair_from_yaml)
 ]
+
+# Default (H, W) crop, and the native crop of each fixed-geometry ViT tower.
+# The tower builders and the data transforms must agree on it.
+DEFAULT_IMAGE_SIZE: tuple[int, int] = (256, 128)
+MODEL_NATIVE_IMAGE_SIZE: dict[str, tuple[int, int]] = {
+    "clip_vit_b16": (256, 128),
+    "clip_vit_l14": (224, 112),
+    "dinov2_vitb14_reg": (252, 126),
+}
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "configs" / "convnext_baseline.yml"
 
 
 def _resume_from_yaml(value: object) -> object:
@@ -147,7 +146,7 @@ class DataConfig(StrictConfig):
     train_augmentation: bool = True
     train_domains: list[DomainName] | None = None
     eval_domains: list[DomainName] | None = None
-    image_size: ImageSize = (256, 128)
+    image_size: ImageSize = DEFAULT_IMAGE_SIZE
     degrade_aug: DegradeAugConfig = Field(default_factory=DegradeAugConfig)
 
 
@@ -274,66 +273,21 @@ class ExperimentConfig(StrictConfig):
             )
         return self
 
+    @model_validator(mode="after")
+    def _image_size_matches_vit_geometry(self) -> ExperimentConfig:
+        native = MODEL_NATIVE_IMAGE_SIZE.get(self.model.name)
+        if native is not None and self.data.image_size != native:
+            raise ValueError(
+                f"model.name={self.model.name} needs data.image_size={native}, "
+                f"got {self.data.image_size}"
+            )
+        return self
+
 
 def _resolve(path: Path | None, project_root: Path) -> Path | None:
     if path is None:
         return None
     return path if path.is_absolute() else (project_root / path).resolve()
-
-
-def dataset_looks_present(data: Path) -> bool:
-    """True when annotations and all three organizer image corpora exist.
-
-    Requires Market1501 (either folder name), PA100k, and PETA — not just one
-    corpus — so a partial extract cannot skip the rest of the download.
-    """
-    if not (data / "annotations").is_dir():
-        return False
-    market = (data / "Market1501").is_dir() or (data / "Market-1501-v15.09.15").is_dir()
-    pa100k = (data / "PA100k").is_dir() or (data / "PA100K").is_dir()
-    peta = (data / "PETA").is_dir()
-    return market and pa100k and peta
-
-
-def discover_main_checkout_data(project_root: Path) -> Path | None:
-    """Return sibling main checkout ``data/`` when this is an experiment worktree.
-
-    Layout expected under the parent workspace::
-
-        attribute-based-person-retrieval-core/data          # shared
-        attribute-based-person-retrieval-core-e34/          # worktree
-    """
-    root = project_root.resolve()
-    main = (root.parent / MAIN_CHECKOUT_DIRNAME).resolve()
-    if main == root:
-        return None
-    candidate = main / "data"
-    if dataset_looks_present(candidate):
-        return candidate
-    return None
-
-
-def resolve_data_root(configured: Path, project_root: Path) -> Path:
-    """Resolve ``data.root`` for shared worktree datasets.
-
-    Order: ``WACV_DATA_ROOT`` env → absolute YAML path → local relative path
-    when the dataset is already there → sibling main checkout ``data/`` when
-    present → otherwise the local relative path (download target).
-
-    Prefer a junction/symlink named ``data`` in new worktrees (see AGENTS.md).
-    """
-    override = os.environ.get(DATA_ROOT_ENV, "").strip()
-    if override:
-        return Path(override).expanduser().resolve()
-    if configured.is_absolute():
-        return configured.resolve()
-    resolved = (project_root / configured).resolve()
-    if dataset_looks_present(resolved):
-        return resolved
-    shared = discover_main_checkout_data(project_root)
-    if shared is not None:
-        return shared
-    return resolved
 
 
 def _resolve_resume(
@@ -352,9 +306,7 @@ def load_config(path: Path, *, project_root: Path | None = None) -> ExperimentCo
     config_path = path.resolve()
     payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     config = ExperimentConfig.model_validate(payload)
-    root = (
-        project_root.resolve() if project_root else Path(__file__).resolve().parents[2]
-    )
+    root = project_root.resolve() if project_root else PROJECT_ROOT
 
     data = config.data.model_copy(
         update={"root": resolve_data_root(config.data.root, root)}

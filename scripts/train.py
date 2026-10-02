@@ -14,7 +14,11 @@ from torch.utils.data import DataLoader
 
 if TYPE_CHECKING:
     from src.wacv.config import ExperimentConfig
-    from src.wacv.engine import AsmrTrainContext, RankingEvalData
+    from src.wacv.engine import AsmrTrainContext
+    from src.wacv.evaluation import RankingEvalData
+    from src.wacv.models.clip import ClipAttributeClassifier
+    from src.wacv.models.dinov2 import Dinov2AttributeClassifier
+    from src.wacv.monitoring.tracking import RunTracker
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -24,11 +28,13 @@ LOGGER = logging.getLogger(__name__)
 
 
 def parse_args() -> argparse.Namespace:
+    from src.wacv.config import DEFAULT_CONFIG_PATH
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--config",
         type=Path,
-        default=ROOT / "configs" / "convnext_baseline.yml",
+        default=DEFAULT_CONFIG_PATH,
     )
     return parser.parse_args()
 
@@ -57,11 +63,11 @@ def build_loaders(
     from src.wacv.attributes import attribute_names_from_columns
     from src.wacv.data import (
         AttributeDataset,
+        build_loader,
         filter_gt_by_domains,
         load_gt,
         transforms_for_model,
     )
-    from src.wacv.engine import resolve_num_workers
 
     annotation_root = config.data.root / "annotations" / "task1"
     train_gt = filter_gt_by_domains(
@@ -77,22 +83,14 @@ def build_loaders(
         train_gt = train_gt.iloc[: config.data.limit]
         val_gt = val_gt.iloc[: config.data.limit]
 
-    image_size = (int(config.data.image_size[0]), int(config.data.image_size[1]))
     train_transform = transforms_for_model(
         config.model.name,
         train=config.data.train_augmentation,
-        image_size=image_size,
+        image_size=config.data.image_size,
         degrade_aug=config.data.degrade_aug,
     )
-    if not config.data.train_augmentation:
-        train_transform = transforms_for_model(
-            config.model.name,
-            train=False,
-            image_size=image_size,
-            degrade_aug=config.data.degrade_aug,
-        )
     eval_transform = transforms_for_model(
-        config.model.name, train=False, image_size=image_size
+        config.model.name, train=False, image_size=config.data.image_size
     )
     train_dataset = AttributeDataset(
         train_gt,
@@ -104,23 +102,8 @@ def build_loaders(
     val_dataset = AttributeDataset(
         val_gt, config.data.root, eval_transform, attribute_names=attribute_names
     )
-    workers = resolve_num_workers(config.data.num_workers)
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config.data.batch_size,
-        shuffle=True,
-        num_workers=workers,
-        pin_memory=device.type == "cuda",
-        persistent_workers=workers > 0,
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=config.data.batch_size,
-        shuffle=False,
-        num_workers=workers,
-        pin_memory=device.type == "cuda",
-        persistent_workers=workers > 0,
-    )
+    train_loader = build_loader(train_dataset, config.data, device, shuffle=True)
+    val_loader = build_loader(val_dataset, config.data, device, shuffle=False)
 
     positive_rates = train_gt[list(attribute_names)].astype(float).mean()
     positive_rates = positive_rates.clip(lower=1e-6)
@@ -141,11 +124,12 @@ def build_ranking_eval(
     from src.wacv.attributes import attribute_names_from_columns
     from src.wacv.data import (
         AttributeDataset,
+        build_loader,
         load_gt,
         load_queries,
         transforms_for_model,
     )
-    from src.wacv.engine import RankingEvalData, resolve_num_workers
+    from src.wacv.evaluation import RankingEvalData
 
     val_root = config.data.root / "annotations" / "task2" / "val"
     gt_path = val_root / "gt.csv"
@@ -166,27 +150,15 @@ def build_ranking_eval(
         ground_truth = ground_truth.iloc[: config.data.limit]
         queries = queries[: config.data.limit]
 
-    workers = resolve_num_workers(config.data.num_workers)
-    loader = DataLoader(
-        AttributeDataset(
-            ground_truth,
-            config.data.root,
-            transforms_for_model(
-                config.model.name,
-                train=False,
-                image_size=(
-                    int(config.data.image_size[0]),
-                    int(config.data.image_size[1]),
-                ),
-            ),
-            attribute_names=attribute_names,
+    dataset = AttributeDataset(
+        ground_truth,
+        config.data.root,
+        transforms_for_model(
+            config.model.name, train=False, image_size=config.data.image_size
         ),
-        batch_size=config.data.batch_size,
-        shuffle=False,
-        num_workers=workers,
-        pin_memory=device.type == "cuda",
-        persistent_workers=workers > 0,
+        attribute_names=attribute_names,
     )
+    loader = build_loader(dataset, config.data, device, shuffle=False)
     gallery_attrs = ground_truth[list(attribute_names)].to_numpy(dtype=np.int64)
     return RankingEvalData(
         queries=queries,
@@ -207,24 +179,19 @@ def maybe_wrap_logit_adjust(
 
     offset = logit_adjustment_offset(prior.to(device))
     LOGGER.info("logit_adjust enabled (train-time prior offset)")
-    return LogitAdjustedLoss(criterion, offset)  # type: ignore[arg-type]
-
-
-def _supports_lp_ft(model: torch.nn.Module) -> bool:
-    from src.wacv.models.clip import ClipAttributeClassifier
-    from src.wacv.models.dinov2 import Dinov2AttributeClassifier
-
-    return isinstance(model, (ClipAttributeClassifier, Dinov2AttributeClassifier))
+    return LogitAdjustedLoss(criterion, offset)
 
 
 def _run_linear_probe_stage(
     *,
-    model: torch.nn.Module,
+    model: ClipAttributeClassifier | Dinov2AttributeClassifier,
     criterion: torch.nn.Module,
     device: torch.device,
-    tracker,
+    tracker: RunTracker,
     config: ExperimentConfig,
-    fit_data: tuple[DataLoader, DataLoader, RankingEvalData | None, object],
+    fit_data: tuple[
+        DataLoader, DataLoader, RankingEvalData | None, AsmrTrainContext | None
+    ],
 ) -> torch.optim.Optimizer:
     """Stage-1 LP then build the stage-2 AdamW optimizer with layer-wise LR."""
     from src.wacv.engine import Trainer
@@ -284,6 +251,8 @@ def main() -> None:
     from src.wacv.engine import Trainer, resolve_device, seed_everything
     from src.wacv.losses import build_attribute_criterion
     from src.wacv.models import build_model
+    from src.wacv.models.clip import ClipAttributeClassifier
+    from src.wacv.models.dinov2 import Dinov2AttributeClassifier
     from src.wacv.monitoring.tracking import RunTracker
     from src.wacv.utils import configure_default_logging
 
@@ -326,7 +295,9 @@ def main() -> None:
             ranking is not None,
             config.optimization.lp_ft,
         )
-        if config.optimization.lp_ft and _supports_lp_ft(model):
+        if config.optimization.lp_ft and isinstance(
+            model, ClipAttributeClassifier | Dinov2AttributeClassifier
+        ):
             optimizer = _run_linear_probe_stage(
                 model=model,
                 criterion=criterion,

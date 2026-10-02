@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from src.wacv.config import (
+from src.wacv.data_root import (
     DATA_ROOT_ENV,
     dataset_looks_present,
     discover_main_checkout_data,

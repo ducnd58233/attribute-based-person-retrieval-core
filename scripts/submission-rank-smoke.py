@@ -21,18 +21,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import importlib
 import os
 import sys
 import time
 import traceback
 from pathlib import Path
 from typing import Any
-
-# resource is Linux/macOS only (Docker eval image); optional on Windows hosts.
-try:
-    import resource as _resource_mod
-except ImportError:  # pragma: no cover - Windows local path
-    _resource_mod = None
 
 import numpy as np
 
@@ -73,9 +68,12 @@ def parse_args() -> argparse.Namespace:
 
 
 def _peak_rss_mb() -> float:
-    if _resource_mod is None:
+    """Peak RSS in MB; ``resource`` exists on Linux/macOS (the Docker eval image)."""
+    if sys.platform == "win32":
         return float("nan")
-    return _resource_mod.getrusage(_resource_mod.RUSAGE_SELF).ru_maxrss / 1024.0
+    import resource
+
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
 
 
 def _resolve_image(data_root: Path, rel: str) -> Path:
@@ -153,7 +151,7 @@ def main() -> int:
         f"peak_rss_mb={_peak_rss_mb():.1f}",
         flush=True,
     )
-    import run
+    run = importlib.import_module("run")
 
     t1 = time.perf_counter()
     run.load_model()

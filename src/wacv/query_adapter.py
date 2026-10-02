@@ -7,11 +7,16 @@ ranking, without soft LLM text at inference.
 
 from __future__ import annotations
 
-from typing import Protocol, cast
+from typing import Protocol, cast, runtime_checkable
 
 import torch
 import torch.nn.functional as F
 from torch import nn
+
+
+@runtime_checkable
+class _EncodesFeatures(Protocol):
+    def encode_features(self, images: torch.Tensor) -> torch.Tensor: ...
 
 
 class _ConvNeXtLike(Protocol):
@@ -46,9 +51,8 @@ def _feature_dim_from_classifier(classifier: nn.Module) -> int:
 
 def pooled_features(model: nn.Module, images: torch.Tensor) -> torch.Tensor:
     """Extract global pooled features before the attribute classification head."""
-    encode = getattr(model, "encode_features", None)
-    if callable(encode):
-        return encode(images)
+    if isinstance(model, _EncodesFeatures):
+        return model.encode_features(images)
     if hasattr(model, "features") and hasattr(model, "avgpool"):
         backbone = cast(_ConvNeXtLike, model)
         features = backbone.features(images)
@@ -160,17 +164,3 @@ class AttributeModelWithHardQuery(nn.Module):
     def query_embeddings(self, queries: torch.Tensor) -> torch.Tensor:
         """Encode binary query vectors into the hard-query embedding space."""
         return self.hard_query_adapter.encode_queries(queries)
-
-
-def attach_hard_query_adapter(
-    backbone: nn.Module,
-    *,
-    num_attributes: int,
-    adapter_dim: int,
-) -> AttributeModelWithHardQuery:
-    """Wrap a classifier backbone with a CLEAR-lite hard-query adapter."""
-    return AttributeModelWithHardQuery(
-        backbone,
-        num_attributes=num_attributes,
-        adapter_dim=adapter_dim,
-    )

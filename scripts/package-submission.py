@@ -8,7 +8,7 @@ import shutil
 import sys
 import zipfile
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import torch
 
@@ -21,6 +21,8 @@ _ZIP_EXCLUDED_FILE_NAMES = {".DS_Store"}
 
 
 def parse_args() -> argparse.Namespace:
+    from src.wacv.config import DEFAULT_CONFIG_PATH
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--checkpoint",
@@ -31,7 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--config",
         type=Path,
-        default=ROOT / "configs" / "convnext_baseline.yml",
+        default=DEFAULT_CONFIG_PATH,
         help="Rebuild architecture for a clean weight export",
     )
     parser.add_argument(
@@ -67,6 +69,7 @@ def _export_weights(
     from src.wacv.checkpoint import load_model_weights
     from src.wacv.config import load_config
     from src.wacv.models import build_model
+    from src.wacv.normalization import normalization_for_model
 
     config = load_config(config_path)
     gt_path = config.data.root / "annotations" / "task1" / "train" / "gt.csv"
@@ -78,14 +81,14 @@ def _export_weights(
     load_model_weights(checkpoint.resolve(), model, map_location=torch.device("cpu"))
     destination.parent.mkdir(parents=True, exist_ok=True)
     weight_format = "state_dict"
-    image_h = int(config.data.image_size[0])
-    image_w = int(config.data.image_size[1])
+    image_h, image_w = config.data.image_size
+    stats = normalization_for_model(config.model.name)
     if config.model.name.startswith("clip_") or config.model.name.startswith("dinov2_"):
         # TorchScript avoids vendoring open_clip / DINOv2 hub code into the eval image.
         model.eval()
         example = torch.zeros(1, 3, image_h, image_w)
         with torch.inference_mode():
-            traced = torch.jit.trace(model, example)
+            traced = cast(torch.jit.ScriptModule, torch.jit.trace(model, example))
         traced.save(str(destination))
         weight_format = "torchscript"
     else:
@@ -99,16 +102,8 @@ def _export_weights(
         "source_checkpoint": str(checkpoint),
         "weight_format": weight_format,
         "image_size": [image_h, image_w],
-        "image_mean": (
-            [0.48145466, 0.4578275, 0.40821073]
-            if config.model.name.startswith("clip_")
-            else [0.485, 0.456, 0.406]
-        ),
-        "image_std": (
-            [0.26862954, 0.26130258, 0.27577711]
-            if config.model.name.startswith("clip_")
-            else [0.229, 0.224, 0.225]
-        ),
+        "image_mean": list(stats.mean),
+        "image_std": list(stats.std),
         "ranking_distance": config.ranking.distance,
         "ranking_temperature": float(config.ranking.temperature),
         "ranking_alpha": float(config.ranking.alpha),

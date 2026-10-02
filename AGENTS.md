@@ -141,21 +141,82 @@ here.
   suppressing the rule or leaving the extraction unwritten.
 - **`scripts/` file naming: `-`, never `_` (MUST):** every file directly
   under `scripts/` uses hyphens (`export-colab-notebook.py`,
-  `sweep-ranking-distance.py`), matching the CLI-entrypoint convention
+  `submission-rank-smoke.py`), matching the CLI-entrypoint convention
   already established there. This does not apply to `src/wacv/**` -
   Python package/module names there must stay valid identifiers
   (underscores), and cannot use hyphens at all.
 - **`src/wacv/` folder layout by concern (MUST):** a concern gets its own
   subpackage once it is more than "one obvious file" - `src/wacv/models/`
-  (network architectures), `src/wacv/evaluation/` (prediction, ranking
-  distances, metric computation), `src/wacv/monitoring/` (`metrics.py`
-  scoring functions, `tracking.py` `RunTracker` persistence/logging),
-  `src/wacv/remote/` (hosted-GPU training backends). A single-file module
-  that does not yet belong to one of these concerns (`data.py`,
-  `config.py`, `checkpoint.py`, `losses.py`, `attributes.py`,
-  `query_adapter.py`, `visualize.py`, `engine.py`) stays
-  flat rather than being forced into a one-file package - do not create a
-  subpackage without a second file that actually belongs in it.
+  (network architectures; `_common.py` holds the shared head, freeze and
+  layer-wise-LR helpers), `src/wacv/evaluation/` (`predict.py` TTA and
+  gallery prediction, `calibration.py` temperatures, `distances.py` the
+  scorer registry and every ranking distance, `rerank.py` dual softmax,
+  `pipeline.py` the one predict -> calibrate -> rank -> score function;
+  `__init__.py` only re-exports), `src/wacv/monitoring/` (`metrics.py`
+  scoring functions including `mean_accuracy`, `tracking.py` `RunTracker`
+  persistence/logging), `src/wacv/remote/` (hosted-GPU training backends). A
+  single-file module that does not yet belong to one of these concerns
+  (`data.py`, `data_root.py`, `config.py`, `normalization.py`,
+  `checkpoint.py`, `losses.py`, `attributes.py`, `query_adapter.py`,
+  `visualize.py`, `engine.py`) stays flat rather than being forced into a
+  one-file package - do not create a subpackage without a second file that
+  actually belongs in it.
+- **One source per constant (MUST):** a Literal, default or magic value used
+  in two places is defined once and imported. `config.py` owns
+  `DistanceName`/`CalibrationMode`/`TTAView`/`DomainName` (and derives
+  `KNOWN_DOMAINS` from the Literal), `DEFAULT_IMAGE_SIZE`,
+  `MODEL_NATIVE_IMAGE_SIZE` (the fixed crop of each ViT, which
+  `ExperimentConfig` checks against `data.image_size`) and
+  `DEFAULT_CONFIG_PATH`; `normalization.py` owns the ImageNet and CLIP
+  mean/std. `submission/run.py` is the one deliberate exception (it ships
+  alone) and reads those values from `model_card.json` instead.
+- **Remote code and weights are pinned and safe (MUST):** every
+  `torch.hub.load` names an immutable commit (see `DINOV2_HUB_COMMIT`), never
+  a branch; every `torch.load` uses `weights_only=True`. Moving to a new
+  upstream commit means re-loading a real checkpoint with `strict=True`
+  against it before changing the pin.
+- **A behavior-preserving change starts from golden outputs (MUST):** a
+  refactor, a move or a typing pass is "preserving" only if you can show it.
+  Before the first edit, capture outputs from the unchanged code on organizer
+  val data and a seeded smoke run: the scorers on seeded arrays, real cached
+  probabilities through the full S* pipeline, a CPU `configs/smoke.yml` run
+  (per-epoch metrics and `best.pt` tensors), `evaluate.py` with calibration,
+  `package-submission.py` then `run.py` `rank_gallery`, and model structure
+  (state-dict keys, freeze flags, layer-wise LR groups). Run that harness twice
+  on the unchanged code first and confirm the two captures are identical (the
+  absolute checkpoint path in `model_card.json` is the one run-specific
+  field); then compare bit-for-bit after every commit. The harness is
+  verification, not a test suite: keep it in a scratch directory, not in this
+  repo. The unit tests stayed green through changes that the goldens would
+  have caught, so do not treat a green `pytest` as proof of "unchanged".
+- **Read the diff after every scripted or regex edit (MUST):** a
+  `sed`/Python rename across files cannot tell the library's name from the
+  submission's deliberately different mirror of it. Renaming
+  `apply_per_attribute_temperatures` also rewrote
+  `submission/run.py`'s private `_apply_per_attribute_temperatures` inside a
+  test; only reading `git diff` caught it. Match the exact token, never a
+  substring, and read the result.
+- **Fix type errors in code, with these patterns (MUST):** no suppression
+  comment is ever the answer (see above). What worked for the 59 pyright
+  errors: `module.get_submodule("a.b")`, `get_parameter` and
+  `register_parameter` for dynamic `nn.Module` attributes (they carry a real
+  runtime check); `isinstance` narrowing at the call site instead of a `bool`
+  helper; a runtime-checkable `Protocol` instead of
+  `getattr(x, "name", None)`; a `Protocol` plus `cast` for duck-typed
+  backbones; a class-level annotation for a registered buffer; `cast` once,
+  naming the real type, when a library stub is wrong (`torch.jit.trace`,
+  `torch.hub.load`'s `trust_repo`); a `sys.platform` branch for POSIX-only
+  modules; `importlib.import_module` for a module that only exists on a
+  runtime path. Type a batch by what it can be (train batches may carry query
+  ids, eval batches never do) so `len(batch)` narrows.
+- **The edit hook rejects suppression-directive text anywhere (MUST):** also
+  inside a doc, a docstring, an emitted-code string or a scratch script. Say
+  "a type-checker suppression comment" in prose. Do not emit one into generated
+  notebook cells either; the exporter used to.
+- **Verification runs on CPU while another run owns the GPU (MUST):** export
+  `CUDA_VISIBLE_DEVICES=` (empty) for tests, smoke training, evaluation and
+  packaging. Training on the only GPU belongs to the experiment lane; a smoke
+  run that competes with it can OOM or slow a multi-hour run.
 - **No unrequested code (MUST):** only add files and logic the current task
   acceptance criteria require. Prefer a script under `scripts/` over new
   packages, fixtures, or README sections. Delete scaffolding that is not
@@ -181,10 +242,11 @@ here.
   dependency for something already minimal and correct.
 - **Grep the whole repo before deleting a function or class as dead
   (MUST):** "looks unused in this file" is not evidence. Search every
-  `src/`, `scripts/`, `tests/`, and `submission/` file for the exact name
-  before removing it, and note in the PR description (or commit body)
-  that the search came back empty. `data.py::load_query_ids` and
-  `query_adapter.py::unwrap_backbone` were removed this way - a
+  `src/`, `scripts/`, `tests/`, `submission/`, `configs/`, and
+  `deployments/` file for the exact name before removing it, and note in the
+  PR description (or commit body) that the search came back empty.
+  `query_adapter.py::unwrap_backbone`, `attach_hard_query_adapter` and the
+  whole `wise_ft` cluster were removed this way - a
   same-file-only look would have missed that `scripts/export-colab-
   notebook.py`'s AST-walk-based inlining is also a real caller for some
   functions, which a narrower search would not have ruled out.
@@ -425,7 +487,11 @@ here.
   arbitrarily. This is a syntax/import check, not a substitute for the
   deeper, already-documented bounded smoke run (`uv run python
   scripts/train.py --config configs/smoke.yml`) when the change might
-  affect runtime behavior, not just imports.
+  affect runtime behavior, not just imports. The two `--stage-only` runs
+  write copies of the source under `build/remote-kaggle` and
+  `build/remote-colab`, and pyright scans `build/`: delete both after the
+  check (they are disposable), or a stale copy reports errors that are not in
+  the tree.
 
 </always_on>
 

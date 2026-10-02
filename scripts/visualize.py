@@ -12,11 +12,13 @@ if str(ROOT) not in sys.path:
 
 
 def parse_args() -> argparse.Namespace:
+    from src.wacv.config import DEFAULT_CONFIG_PATH
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--config",
         type=Path,
-        default=ROOT / "configs" / "convnext_baseline.yml",
+        default=DEFAULT_CONFIG_PATH,
     )
     parser.add_argument(
         "--checkpoint",
@@ -58,9 +60,10 @@ def main() -> None:
     from src.wacv.attributes import attribute_names_from_columns
     from src.wacv.checkpoint import load_model_weights
     from src.wacv.config import load_config
-    from src.wacv.data import AttributeDataset, load_gt
+    from src.wacv.data import AttributeDataset, load_gt, transforms_for_model
     from src.wacv.engine import resolve_device
     from src.wacv.models import build_model
+    from src.wacv.normalization import normalization_for_model
     from src.wacv.utils import configure_default_logging
     from src.wacv.visualize import (
         collect_comparisons,
@@ -84,7 +87,12 @@ def main() -> None:
         tuple(str(column) for column in ground_truth.columns)
     )
     dataset = AttributeDataset(
-        ground_truth, config.data.root, attribute_names=attribute_names
+        ground_truth,
+        config.data.root,
+        transforms_for_model(
+            config.model.name, train=False, image_size=config.data.image_size
+        ),
+        attribute_names=attribute_names,
     )
     image_paths = [str(path) for path in ground_truth["image"].tolist()]
 
@@ -98,6 +106,7 @@ def main() -> None:
         image_paths,
         device,
         limit=args.limit,
+        stats=normalization_for_model(config.model.name),
         threshold=args.threshold,
     )
     print_comparison_summary(comparisons)

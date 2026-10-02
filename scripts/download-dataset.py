@@ -16,7 +16,7 @@ STARTER_URL = "https://github.com/speckean/UPAR-Challenge-2027.git"
 
 def resolve_data_dir() -> Path:
     """Same rules as ``load_config``: env → local → sibling main checkout."""
-    from src.wacv.config import resolve_data_root
+    from src.wacv.data_root import resolve_data_root
 
     return resolve_data_root(Path("data"), ROOT)
 
@@ -90,7 +90,7 @@ def download_images(starter: Path, data: Path) -> None:
 
 
 def main() -> None:
-    from src.wacv.config import (
+    from src.wacv.data_root import (
         DATA_ROOT_ENV,
         MAIN_CHECKOUT_DIRNAME,
         dataset_looks_present,
