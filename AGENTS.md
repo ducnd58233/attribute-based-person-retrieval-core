@@ -282,13 +282,15 @@ here.
 - **Remote GPU training: one entrypoint, one backend per hosted provider
   (MUST):** headless `Download → Train → Eval → Visualize → Package` runs
   on hosted GPUs go through `scripts/remote-training.py <backend> --config
-  ...`, never a hand-written one-off. `<backend>` is `kaggle` (primary —
-  cross-platform including native Windows; a pushed kernel runs
-  server-side, so it survives a closed laptop) or `colab` (secondary —
-  `google-colab-cli`, **Linux/macOS only**, run from WSL2 on Windows;
-  `colab exec` blocks the local process for the whole run, so use
-  `tmux`/`nohup` for one that must outlive a closed terminal, or prefer
-  Kaggle). Add a third hosted provider by dropping a module under
+  ...`, never a hand-written one-off. `<backend>` is `colab` (try
+  first — `google-colab-cli`, **Linux/macOS only**, run from WSL2 on
+  Windows; `colab exec` blocks the local process for the whole run, so use
+  `tmux`/`nohup` for one that must outlive a closed terminal) or `kaggle`
+  (the fallback — cross-platform including native Windows; a pushed
+  kernel runs server-side, so it survives a closed laptop, which also
+  makes it the better choice for a run known in advance to outlive a
+  session). See the next rule for exactly when an agent moves from one to
+  the other. Add a third hosted provider by dropping a module under
   `src/wacv/remote/` that exposes a `register(subparsers)` function (same
   shape as `kaggle.py`/`colab.py`) and listing it in
   `scripts/remote-training.py`'s `BACKENDS`; do not add a second top-level
@@ -301,6 +303,32 @@ here.
   this private repo to be `git clone`d from inside the remote sandbox —
   each stages a self-contained folder (this repo's `scripts/` + `src/wacv/`
   + one experiment YAML, never `data/`) and ships that instead.
+
+- **Training order is Colab, then Kaggle, then local — and a code bug
+  never falls through to the next one (MUST):** start every real training
+  run with `remote-training.py colab`. Move to the next option only on an
+  **infrastructure failure** — the `colab`/`kaggle` CLI wrapper itself
+  exiting non-zero before or during the run: auth (`gcloud`/ADC), quota,
+  session/kernel provisioning, network, or a timeout with no result yet.
+  On that class of failure, retry with `remote-training.py kaggle`; if
+  Kaggle also fails the same way, only then fall back to training on this
+  machine (`uv run python scripts/train.py --config configs/<name>.yml`).
+  Never start on the local machine by default — both hosted options are
+  free GPU time this machine does not have to spend, and skipping
+  straight to local silently defeats the reason `remote-training.py`
+  exists.
+
+  A **code-logic failure** — a traceback or exception from inside the
+  staged training code itself, visible in the downloaded run's logs, a
+  crashing import, a NaN loss, a shape mismatch, anything that is a bug in
+  *this repo's* code rather than in reaching a GPU — does **not** trigger
+  a fallback to the next backend or to local. Colab and Kaggle run the
+  identical staged code (see `stage.py` above), so Kaggle would reproduce
+  the exact same crash: retrying it burns a second remote quota slot for
+  no new information, and a false "it eventually ran" reads as success
+  once local training happens to route around the same bug on a
+  differently-shaped dev box. Fix the code, verify with the
+  notebook/remote-path check above, then restart from Colab.
 
   ```sh
   uv sync                                        # pulls kaggle+packaging from dev
