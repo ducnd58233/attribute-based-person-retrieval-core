@@ -4,10 +4,17 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 
 import yaml
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PositiveFloat
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    PositiveFloat,
+    model_validator,
+)
 from pydantic.types import NonNegativeInt, PositiveInt
 
 # Shared across git worktrees; see AGENTS.md "Experiment worktrees: shared data".
@@ -20,6 +27,7 @@ ModelName = Literal[
     "convnext_base",
     "clip_vit_b16",
     "clip_vit_l14",
+    "dinov2_vitb14_reg",
 ]
 DeviceName = Literal["auto", "cpu", "cuda", "tpu"]
 DistanceName = Literal[
@@ -49,6 +57,19 @@ def _image_size_from_yaml(value: object) -> object:
 
 ImageSize = Annotated[
     tuple[PositiveInt, PositiveInt], BeforeValidator(_image_size_from_yaml)
+]
+
+
+def _pair_from_yaml(value: object) -> object:
+    """Accept YAML length-2 lists as pairs."""
+    if isinstance(value, list) and len(value) == 2:
+        return (value[0], value[1])
+    return value
+
+
+FloatPair = Annotated[tuple[float, float], BeforeValidator(_pair_from_yaml)]
+JpegQualityRange = Annotated[
+    tuple[PositiveInt, PositiveInt], BeforeValidator(_pair_from_yaml)
 ]
 
 
@@ -87,6 +108,35 @@ class ModelConfig(StrictConfig):
         description="If >0, inject LoRA on CLIP attention out_proj (PEFT).",
     )
     lora_alpha: PositiveFloat = 16.0
+    weights_path: ConfigPath | None = Field(
+        default=None,
+        description=(
+            "Optional local backbone checkpoint (e.g. vendored DINOv2 .pth). "
+            "When set, skip hub weight download and load this file instead."
+        ),
+    )
+
+
+class DegradeAugConfig(StrictConfig):
+    """CCTV-style train-time degradations (no hue jitter; colour is labelled)."""
+
+    enabled: bool = False
+    downscale: FloatPair = (0.3, 1.0)
+    blur_p: float = Field(default=0.3, ge=0.0, le=1.0)
+    jpeg: JpegQualityRange = (30, 90)
+
+    @model_validator(mode="after")
+    def _check_ranges(self) -> Self:
+        scale_lo, scale_hi = self.downscale
+        if not (0.0 < scale_lo <= scale_hi <= 1.0):
+            raise ValueError(
+                "degrade_aug.downscale must satisfy 0 < min <= max <= 1, "
+                f"got {self.downscale}"
+            )
+        jpeg_lo, jpeg_hi = self.jpeg
+        if jpeg_lo > jpeg_hi:
+            raise ValueError(f"degrade_aug.jpeg min must be <= max, got {self.jpeg}")
+        return self
 
 
 class DataConfig(StrictConfig):
@@ -98,6 +148,17 @@ class DataConfig(StrictConfig):
     train_domains: list[DomainName] | None = None
     eval_domains: list[DomainName] | None = None
     image_size: ImageSize = (256, 128)
+    degrade_aug: DegradeAugConfig = Field(default_factory=DegradeAugConfig)
+
+
+class AsmrAuxConfig(StrictConfig):
+    """ASMR ICCV 2021 semantic-margin auxiliary loss (train-only)."""
+
+    weight: float = Field(default=0.0, ge=0.0, le=5.0)
+
+
+class LossesConfig(StrictConfig):
+    asmr_aux: AsmrAuxConfig = Field(default_factory=AsmrAuxConfig)
 
 
 class OptimizationConfig(StrictConfig):
@@ -200,9 +261,18 @@ class ExperimentConfig(StrictConfig):
     model: ModelConfig = ModelConfig()
     data: DataConfig = DataConfig()
     optimization: OptimizationConfig = OptimizationConfig()
+    losses: LossesConfig = Field(default_factory=LossesConfig)
     ranking: RankingConfig = RankingConfig()
     inference: InferenceConfig = InferenceConfig()
     run: RunConfig
+
+    @model_validator(mode="after")
+    def _asmr_requires_hard_query_adapter(self) -> ExperimentConfig:
+        if self.losses.asmr_aux.weight > 0.0 and not self.model.hard_query_adapter:
+            raise ValueError(
+                "losses.asmr_aux.weight > 0 requires model.hard_query_adapter=true"
+            )
+        return self
 
 
 def _resolve(path: Path | None, project_root: Path) -> Path | None:
@@ -289,6 +359,9 @@ def load_config(path: Path, *, project_root: Path | None = None) -> ExperimentCo
     data = config.data.model_copy(
         update={"root": resolve_data_root(config.data.root, root)}
     )
+    model = config.model.model_copy(
+        update={"weights_path": _resolve(config.model.weights_path, root)}
+    )
     output_dir = _resolve(config.run.output_dir, root)
     if output_dir is None:
         raise ValueError("run.output_dir resolved to None")
@@ -301,4 +374,4 @@ def load_config(path: Path, *, project_root: Path | None = None) -> ExperimentCo
             "init_weights": _resolve(config.run.init_weights, root),
         }
     )
-    return config.model_copy(update={"data": data, "run": run})
+    return config.model_copy(update={"model": model, "data": data, "run": run})

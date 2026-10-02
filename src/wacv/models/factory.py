@@ -5,6 +5,7 @@ from torch import nn
 from src.wacv.config import ModelConfig
 from src.wacv.models.clip import build_clip_attribute_classifier, build_clip_vit_l14
 from src.wacv.models.convnext import build_convnext
+from src.wacv.models.dinov2 import build_dinov2_vitb14_reg
 from src.wacv.models.resnet import build_resnet50
 from src.wacv.query_adapter import attach_hard_query_adapter
 
@@ -35,6 +36,15 @@ def build_model(config: ModelConfig, *, num_attributes: int) -> nn.Module:
         )
         # LoRA path always keeps the base tower frozen.
         backbone.freeze_backbone()
+    elif config.name == "dinov2_vitb14_reg":
+        backbone = build_dinov2_vitb14_reg(
+            num_attributes=num_attributes,
+            pretrained=config.pretrained,
+            dropout=config.dropout,
+            weights_path=config.weights_path,
+        )
+        if config.freeze_backbone:
+            backbone.freeze_backbone()
     else:
         backbone = build_convnext(
             config.name,

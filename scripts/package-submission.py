@@ -80,8 +80,8 @@ def _export_weights(
     weight_format = "state_dict"
     image_h = int(config.data.image_size[0])
     image_w = int(config.data.image_size[1])
-    if config.model.name.startswith("clip_"):
-        # TorchScript avoids vendoring open_clip into the eval image.
+    if config.model.name.startswith("clip_") or config.model.name.startswith("dinov2_"):
+        # TorchScript avoids vendoring open_clip / DINOv2 hub code into the eval image.
         model.eval()
         example = torch.zeros(1, 3, image_h, image_w)
         with torch.inference_mode():

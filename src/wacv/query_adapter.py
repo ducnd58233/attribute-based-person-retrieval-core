@@ -46,6 +46,9 @@ def _feature_dim_from_classifier(classifier: nn.Module) -> int:
 
 def pooled_features(model: nn.Module, images: torch.Tensor) -> torch.Tensor:
     """Extract global pooled features before the attribute classification head."""
+    encode = getattr(model, "encode_features", None)
+    if callable(encode):
+        return encode(images)
     if hasattr(model, "features") and hasattr(model, "avgpool"):
         backbone = cast(_ConvNeXtLike, model)
         features = backbone.features(images)
@@ -86,6 +89,24 @@ class HardQueryAdapter(nn.Module):
             nn.GELU(),
             nn.Linear(adapter_dim, adapter_dim),
         )
+        self.semantic_weight_logits = nn.Parameter(torch.zeros(num_attributes))
+        self.margin_scale = nn.Parameter(torch.tensor(0.0))
+
+    def attribute_semantic_weights(self) -> torch.Tensor:
+        """Positive per-attribute weights for weighted Hamming (ASMR)."""
+        return F.softplus(self.semantic_weight_logits) + 1e-6
+
+    def semantic_margin_matrix(self, query_bits: torch.Tensor) -> torch.Tensor:
+        """Pairwise margins proportional to weighted Hamming between queries."""
+        from src.wacv.losses import pairwise_weighted_hamming
+
+        scale = F.softplus(self.margin_scale)
+        hamming = pairwise_weighted_hamming(
+            query_bits, self.attribute_semantic_weights()
+        )
+        margins = scale * hamming
+        margins.fill_diagonal_(0.0)
+        return margins
 
     def encode_queries(self, queries: torch.Tensor) -> torch.Tensor:
         """L2-normalized query embeddings from binary / soft attribute vectors."""

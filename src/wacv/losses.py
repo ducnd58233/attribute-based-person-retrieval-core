@@ -76,6 +76,44 @@ def hard_query_infonce(
     return F.cross_entropy(logits, labels)
 
 
+def pairwise_weighted_hamming(
+    query_bits: torch.Tensor,
+    attribute_weights: torch.Tensor,
+) -> torch.Tensor:
+    """Weighted Hamming distance matrix for binary query rows ``(Q, A)``."""
+    if query_bits.ndim != 2:
+        raise ValueError(f"query_bits must be 2D, got shape {tuple(query_bits.shape)}")
+    weights = attribute_weights.float()
+    if weights.shape != (query_bits.shape[1],):
+        raise ValueError(
+            "attribute_weights length must match query_bits num_attributes"
+        )
+    diff = (query_bits.unsqueeze(1) - query_bits.unsqueeze(0)).abs()
+    return (diff * weights.view(1, 1, -1)).sum(dim=-1)
+
+
+def asmr_semantic_margin_loss(
+    gallery_embeddings: torch.Tensor,
+    query_embeddings: torch.Tensor,
+    local_query_index: torch.Tensor,
+    margin_matrix: torch.Tensor,
+) -> torch.Tensor:
+    """Multi-prototype margin loss with per-pair semantic margins (ASMR-style)."""
+    if gallery_embeddings.shape[0] == 0:
+        return gallery_embeddings.new_zeros(())
+    sim = gallery_embeddings @ query_embeddings.T
+    labels = local_query_index.long()
+    pos_sim = sim.gather(1, labels.unsqueeze(1))
+    row_margins = margin_matrix.index_select(0, labels)
+    mask = torch.ones_like(sim, dtype=torch.bool)
+    mask.scatter_(1, labels.unsqueeze(1), False)
+    violations = F.relu(sim - pos_sim + row_margins)
+    selected = violations[mask]
+    if selected.numel() == 0:
+        return violations.new_zeros(())
+    return selected.mean()
+
+
 def logit_adjustment_offset(prior: torch.Tensor) -> torch.Tensor:
     """Return log(prior / (1 - prior)) per attribute (Menon et al. 2021)."""
     rates = prior.detach().float().clamp(1e-6, 1.0 - 1e-6)
