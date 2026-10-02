@@ -141,21 +141,40 @@ here.
   suppressing the rule or leaving the extraction unwritten.
 - **`scripts/` file naming: `-`, never `_` (MUST):** every file directly
   under `scripts/` uses hyphens (`export-colab-notebook.py`,
-  `sweep-ranking-distance.py`), matching the CLI-entrypoint convention
+  `submission-rank-smoke.py`), matching the CLI-entrypoint convention
   already established there. This does not apply to `src/wacv/**` -
   Python package/module names there must stay valid identifiers
   (underscores), and cannot use hyphens at all.
 - **`src/wacv/` folder layout by concern (MUST):** a concern gets its own
   subpackage once it is more than "one obvious file" - `src/wacv/models/`
-  (network architectures), `src/wacv/evaluation/` (prediction, ranking
-  distances, metric computation), `src/wacv/monitoring/` (`metrics.py`
-  scoring functions, `tracking.py` `RunTracker` persistence/logging),
-  `src/wacv/remote/` (hosted-GPU training backends). A single-file module
-  that does not yet belong to one of these concerns (`data.py`,
-  `config.py`, `checkpoint.py`, `losses.py`, `attributes.py`,
-  `query_adapter.py`, `visualize.py`, `engine.py`) stays
-  flat rather than being forced into a one-file package - do not create a
-  subpackage without a second file that actually belongs in it.
+  (network architectures; `_common.py` holds the shared head, freeze and
+  layer-wise-LR helpers), `src/wacv/evaluation/` (`predict.py` TTA and
+  gallery prediction, `calibration.py` temperatures, `distances.py` the
+  scorer registry and every ranking distance, `rerank.py` dual softmax,
+  `pipeline.py` the one predict -> calibrate -> rank -> score function;
+  `__init__.py` only re-exports), `src/wacv/monitoring/` (`metrics.py`
+  scoring functions including `mean_accuracy`, `tracking.py` `RunTracker`
+  persistence/logging), `src/wacv/remote/` (hosted-GPU training backends). A
+  single-file module that does not yet belong to one of these concerns
+  (`data.py`, `data_root.py`, `config.py`, `normalization.py`,
+  `checkpoint.py`, `losses.py`, `attributes.py`, `query_adapter.py`,
+  `visualize.py`, `engine.py`) stays flat rather than being forced into a
+  one-file package - do not create a subpackage without a second file that
+  actually belongs in it.
+- **One source per constant (MUST):** a Literal, default or magic value used
+  in two places is defined once and imported. `config.py` owns
+  `DistanceName`/`CalibrationMode`/`TTAView`/`DomainName` (and derives
+  `KNOWN_DOMAINS` from the Literal), `DEFAULT_IMAGE_SIZE`,
+  `MODEL_NATIVE_IMAGE_SIZE` (the fixed crop of each ViT, which
+  `ExperimentConfig` checks against `data.image_size`) and
+  `DEFAULT_CONFIG_PATH`; `normalization.py` owns the ImageNet and CLIP
+  mean/std. `submission/run.py` is the one deliberate exception (it ships
+  alone) and reads those values from `model_card.json` instead.
+- **Remote code and weights are pinned and safe (MUST):** every
+  `torch.hub.load` names an immutable commit (see `DINOV2_HUB_COMMIT`), never
+  a branch; every `torch.load` uses `weights_only=True`. Moving to a new
+  upstream commit means re-loading a real checkpoint with `strict=True`
+  against it before changing the pin.
 - **No unrequested code (MUST):** only add files and logic the current task
   acceptance criteria require. Prefer a script under `scripts/` over new
   packages, fixtures, or README sections. Delete scaffolding that is not
@@ -425,7 +444,11 @@ here.
   arbitrarily. This is a syntax/import check, not a substitute for the
   deeper, already-documented bounded smoke run (`uv run python
   scripts/train.py --config configs/smoke.yml`) when the change might
-  affect runtime behavior, not just imports.
+  affect runtime behavior, not just imports. The two `--stage-only` runs
+  write copies of the source under `build/remote-kaggle` and
+  `build/remote-colab`, and pyright scans `build/`: delete both after the
+  check (they are disposable), or a stale copy reports errors that are not in
+  the tree.
 
 </always_on>
 
