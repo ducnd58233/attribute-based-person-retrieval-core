@@ -7,20 +7,19 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, get_args
 
 import numpy as np
 import pandas as pd
 import torch
 
 if TYPE_CHECKING:
-    from src.wacv.config import ExperimentConfig
+    from src.wacv.config import EvalProtocol, ExperimentConfig
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-ProtocolName = Literal["id_val", "lodo_m"]
 METRIC_KEY_MAP = {
     "mADM": "madm",
     "mAP": "map",
@@ -33,11 +32,13 @@ METRIC_KEY_MAP = {
 
 
 def parse_args() -> argparse.Namespace:
+    from src.wacv.config import DEFAULT_CONFIG_PATH, DistanceName
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--config",
         type=Path,
-        default=ROOT / "configs" / "convnext_baseline.yml",
+        default=DEFAULT_CONFIG_PATH,
     )
     parser.add_argument(
         "--checkpoint",
@@ -52,14 +53,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--distance",
-        choices=(
-            "l1",
-            "specker",
-            "clear_hard",
-            "nll",
-            "hybrid",
-            "group_categorical",
-        ),
+        choices=get_args(DistanceName),
         default=None,
         help="override ranking.distance from the config",
     )
@@ -120,7 +114,7 @@ def _evaluate_protocol(
 
 def _prepare_protocol_data(
     config: ExperimentConfig,
-    protocol: ProtocolName,
+    protocol: EvalProtocol,
 ) -> tuple[pd.DataFrame, np.ndarray, tuple[str, ...]]:
     from src.wacv.attributes import attribute_names_from_columns
     from src.wacv.data import (
@@ -150,7 +144,7 @@ def evaluate_checkpoint(
     config_path: Path,
     checkpoint: Path,
     *,
-    protocols: tuple[ProtocolName, ...],
+    protocols: tuple[EvalProtocol, ...],
     distance: str | None = None,
 ) -> tuple[dict[str, dict[str, float]], ExperimentConfig]:
     from src.wacv.checkpoint import load_model_weights
@@ -213,7 +207,7 @@ def main() -> None:
     checkpoint = args.checkpoint or (
         config.run.output_dir / config.run.name / "checkpoints" / "best.pt"
     )
-    protocols: tuple[ProtocolName, ...] = (
+    protocols: tuple[EvalProtocol, ...] = (
         ("id_val", "lodo_m") if args.protocol == "both" else (args.protocol,)
     )
 

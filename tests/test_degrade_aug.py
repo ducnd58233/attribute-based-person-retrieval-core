@@ -10,7 +10,6 @@ from src.wacv.config import load_config
 from src.wacv.data import (
     RandomDownscaleUpsample,
     RandomJpegCompression,
-    color_jitter_hue_span,
     transforms_for_model,
 )
 
@@ -38,9 +37,11 @@ def test_degrade_aug_disables_hue_jitter() -> None:
         image_size=config.data.image_size,
         degrade_aug=config.data.degrade_aug,
     )
-    hue_span = color_jitter_hue_span(pipeline)
-    assert hue_span is not None
-    assert hue_span == (0.0, 0.0)
+    jitters = [
+        step for step in pipeline.transforms if isinstance(step, transforms.ColorJitter)
+    ]
+    assert len(jitters) == 1
+    assert jitters[0].hue is None
 
 
 def test_degrade_aug_pipeline_includes_degradation_steps() -> None:

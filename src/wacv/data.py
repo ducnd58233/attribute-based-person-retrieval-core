@@ -16,16 +16,13 @@ from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 
 from src.wacv.attributes import attribute_names_from_columns
-from src.wacv.config import DataConfig, DegradeAugConfig
-
-KNOWN_DOMAINS: tuple[str, ...] = ("PA100k", "PETA", "Market1501")
-DEFAULT_IMAGE_SIZE: tuple[int, int] = (256, 128)
-
-# open_clip openai mean/std; aspect-preserving ReID crop (default 256x128).
-_CLIP_MEAN = [0.48145466, 0.4578275, 0.40821073]
-_CLIP_STD = [0.26862954, 0.26130258, 0.27577711]
-_IMAGENET_MEAN = [0.485, 0.456, 0.406]
-_IMAGENET_STD = [0.229, 0.224, 0.225]
+from src.wacv.config import (
+    DEFAULT_IMAGE_SIZE,
+    KNOWN_DOMAINS,
+    DataConfig,
+    DegradeAugConfig,
+)
+from src.wacv.normalization import NormalizationStats, normalization_for_model
 
 
 class RandomDownscaleUpsample:
@@ -63,35 +60,20 @@ class RandomJpegCompression:
         return Image.open(buffer).convert("RGB")
 
 
-def color_jitter_hue_span(
-    pipeline: transforms.Compose,
-) -> tuple[float, float] | None:
-    """Return the (min, max) hue jitter factors in ``pipeline``, if any."""
-    for step in pipeline.transforms:
-        if isinstance(step, transforms.ColorJitter):
-            hue = step.hue
-            if hue is None:
-                return (0.0, 0.0)
-            if isinstance(hue, (list, tuple)) and len(hue) == 2:
-                return (float(hue[0]), float(hue[1]))
-            return (float(hue), float(hue))
-    return None
-
-
 def _eval_transform(
-    size: tuple[int, int], *, mean: list[float], std: list[float]
+    size: tuple[int, int], stats: NormalizationStats
 ) -> transforms.Compose:
     return transforms.Compose(
         [
             transforms.Resize(size),
             transforms.ToTensor(),
-            transforms.Normalize(mean=mean, std=std),
+            transforms.Normalize(mean=stats.mean, std=stats.std),
         ]
     )
 
 
 def _train_transform(
-    size: tuple[int, int], *, mean: list[float], std: list[float]
+    size: tuple[int, int], stats: NormalizationStats
 ) -> transforms.Compose:
     return transforms.Compose(
         [
@@ -100,7 +82,7 @@ def _train_transform(
             transforms.RandomHorizontalFlip(),
             transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
             transforms.ToTensor(),
-            transforms.Normalize(mean=mean, std=std),
+            transforms.Normalize(mean=stats.mean, std=stats.std),
             transforms.RandomErasing(p=0.25),
         ]
     )
@@ -109,9 +91,7 @@ def _train_transform(
 def _train_transform_degrade(
     size: tuple[int, int],
     degrade: DegradeAugConfig,
-    *,
-    mean: list[float],
-    std: list[float],
+    stats: NormalizationStats,
 ) -> transforms.Compose:
     scale_lo, scale_hi = degrade.downscale
     jpeg_lo, jpeg_hi = degrade.jpeg
@@ -133,7 +113,7 @@ def _train_transform_degrade(
                 hue=0.0,
             ),
             transforms.ToTensor(),
-            transforms.Normalize(mean=mean, std=std),
+            transforms.Normalize(mean=stats.mean, std=stats.std),
             transforms.RandomErasing(p=0.25),
         ]
     )
@@ -146,24 +126,13 @@ def transforms_for_model(
     image_size: tuple[int, int] = DEFAULT_IMAGE_SIZE,
     degrade_aug: DegradeAugConfig | None = None,
 ) -> transforms.Compose:
-    """Pick ImageNet or CLIP preprocessing at ``image_size`` (H, W)."""
-    size = (int(image_size[0]), int(image_size[1]))
-    use_degrade = train and degrade_aug is not None and degrade_aug.enabled
-    if model_name.startswith("clip_"):
-        if train:
-            if use_degrade:
-                return _train_transform_degrade(
-                    size, degrade_aug, mean=_CLIP_MEAN, std=_CLIP_STD
-                )
-            return _train_transform(size, mean=_CLIP_MEAN, std=_CLIP_STD)
-        return _eval_transform(size, mean=_CLIP_MEAN, std=_CLIP_STD)
-    if train:
-        if use_degrade:
-            return _train_transform_degrade(
-                size, degrade_aug, mean=_IMAGENET_MEAN, std=_IMAGENET_STD
-            )
-        return _train_transform(size, mean=_IMAGENET_MEAN, std=_IMAGENET_STD)
-    return _eval_transform(size, mean=_IMAGENET_MEAN, std=_IMAGENET_STD)
+    """Pick the model family's preprocessing at ``image_size`` (H, W)."""
+    stats = normalization_for_model(model_name)
+    if not train:
+        return _eval_transform(image_size, stats)
+    if degrade_aug is not None and degrade_aug.enabled:
+        return _train_transform_degrade(image_size, degrade_aug, stats)
+    return _train_transform(image_size, stats)
 
 
 def load_gt(csv_path: Path) -> pd.DataFrame:

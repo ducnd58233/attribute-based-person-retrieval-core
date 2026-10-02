@@ -1,31 +1,25 @@
 """DINOv2 ViT-B/14 with registers as an attribute classifier (252x126 LP-FT).
 
-Weight loading (do not commit checkpoints into git):
+Weight loading (do not commit checkpoints into git). The architecture always
+comes from torch.hub at the pinned commit ``DINOV2_HUB_COMMIT``:
 
-1. **torch.hub (default when ``pretrained=True`` and no ``weights_path``)**
-   ``torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14_reg")``
-   pulls architecture +
-   ``dinov2_vitb14_reg4_pretrain.pth`` from
-   ``https://dl.fbaipublicfiles.com/dinov2/dinov2_vitb14/``.
+1. **Hub weights (``pretrained=True`` and no ``weights_path``)**: the hub entry
+   also downloads the official ``dinov2_vitb14_reg4_pretrain.pth``.
 
-2. **Local / vendored path (``model.weights_path``)**
-   Architecture still comes from torch.hub with ``pretrained=False`` (use a
-   pre-populated ``$TORCH_HOME/hub`` cache offline). Then
-   ``load_state_dict`` from the local ``.pth`` — the path to vendor into a
-   training sandbox or later Codabench zip packaging.
-
-3. **Hugging Face (manual convert)**
-   ``facebook/dinov2-with-registers-base`` — not loaded automatically; export
-   a torch.hub-compatible state_dict if you prefer HF as the download source.
+2. **Local / vendored path (``model.weights_path``)**: hub is called with
+   ``pretrained=False`` (use a pre-populated ``$TORCH_HOME/hub`` cache offline),
+   then ``load_state_dict`` reads the local ``.pth``.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import torch
 from torch import nn
 
+from src.wacv.config import MODEL_NATIVE_IMAGE_SIZE
 from src.wacv.models._common import (
     build_layerwise_param_groups,
     classification_head,
@@ -33,11 +27,14 @@ from src.wacv.models._common import (
 )
 
 DINOV2_HUB_REPO = "facebookresearch/dinov2"
+# Immutable upstream commit (main on 2026-06-03, "Safely load weights from
+# specified URLs (#598)"). Pinned so training never runs whatever code the
+# default branch holds on the day it is launched.
+DINOV2_HUB_COMMIT = "7764ea0f912e53c92e82eb78a2a1631e92725fc8"
 DINOV2_HUB_ENTRY = "dinov2_vitb14_reg"
 
 _PATCH_SIZE = 14
-_TARGET_H = 252
-_TARGET_W = 126
+_TARGET_H, _TARGET_W = MODEL_NATIVE_IMAGE_SIZE["dinov2_vitb14_reg"]
 _FEATURE_DIM = 768
 
 
@@ -107,10 +104,11 @@ def load_dinov2_vitb14_reg_backbone(
     """
     load_pretrained = bool(pretrained) and weights_path is None
     backbone = torch.hub.load(
-        DINOV2_HUB_REPO,
+        f"{DINOV2_HUB_REPO}:{DINOV2_HUB_COMMIT}",
         DINOV2_HUB_ENTRY,
         pretrained=load_pretrained,
-        trust_repo=True,
+        # torch accepts a bool here; its type stub declares ``str``.
+        trust_repo=cast("str", True),
     )
     if not isinstance(backbone, nn.Module):
         raise TypeError(f"unexpected DINOv2 hub return type: {type(backbone)!r}")

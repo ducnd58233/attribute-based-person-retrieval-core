@@ -53,7 +53,7 @@ def resolve_device(requested: DeviceName) -> torch.device:
         try:
             xm = importlib.import_module("torch_xla.core.xla_model")
             return xm.xla_device()
-        except Exception:
+        except (ImportError, RuntimeError):
             if requested == "tpu":
                 raise RuntimeError("TPU / torch_xla is not available") from None
             return torch.device("cpu")

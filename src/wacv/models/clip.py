@@ -10,19 +10,13 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from src.wacv.config import MODEL_NATIVE_IMAGE_SIZE
 from src.wacv.models._common import (
     build_layerwise_param_groups,
     classification_head,
     set_requires_grad,
 )
 from src.wacv.models.lora import inject_lora_into_linear
-
-_CLIP_PATCH_B16 = 16
-_CLIP_PATCH_L14 = 14
-_TARGET_H_B16 = 256
-_TARGET_W_B16 = 128
-_TARGET_H_L14 = 224
-_TARGET_W_L14 = 112
 
 
 @dataclass(frozen=True)
@@ -36,26 +30,23 @@ class ClipTowerSpec:
     pretrained_tag: str = "openai"
 
 
-_CLIP_B16 = ClipTowerSpec(
-    arch="ViT-B-16",
-    patch_size=_CLIP_PATCH_B16,
-    image_height=_TARGET_H_B16,
-    image_width=_TARGET_W_B16,
-)
-_CLIP_L14 = ClipTowerSpec(
-    arch="ViT-L-14",
-    patch_size=_CLIP_PATCH_L14,
-    image_height=_TARGET_H_L14,
-    image_width=_TARGET_W_L14,
-)
+def _tower_spec(arch: str, patch_size: int, model_name: str) -> ClipTowerSpec:
+    height, width = MODEL_NATIVE_IMAGE_SIZE[model_name]
+    return ClipTowerSpec(
+        arch=arch, patch_size=patch_size, image_height=height, image_width=width
+    )
+
+
+_CLIP_B16 = _tower_spec("ViT-B-16", 16, "clip_vit_b16")
+_CLIP_L14 = _tower_spec("ViT-L-14", 14, "clip_vit_l14")
 
 
 def interpolate_clip_positional_embedding(
     positional_embedding: torch.Tensor,
     *,
-    height: int = _TARGET_H_B16,
-    width: int = _TARGET_W_B16,
-    patch_size: int = _CLIP_PATCH_B16,
+    height: int,
+    width: int,
+    patch_size: int,
 ) -> torch.Tensor:
     """Resize CLIP patch positional embeddings to a non-square grid.
 

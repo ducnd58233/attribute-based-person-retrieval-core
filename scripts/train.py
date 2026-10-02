@@ -25,11 +25,13 @@ LOGGER = logging.getLogger(__name__)
 
 
 def parse_args() -> argparse.Namespace:
+    from src.wacv.config import DEFAULT_CONFIG_PATH
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--config",
         type=Path,
-        default=ROOT / "configs" / "convnext_baseline.yml",
+        default=DEFAULT_CONFIG_PATH,
     )
     return parser.parse_args()
 
