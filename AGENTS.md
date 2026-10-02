@@ -175,6 +175,48 @@ here.
   a branch; every `torch.load` uses `weights_only=True`. Moving to a new
   upstream commit means re-loading a real checkpoint with `strict=True`
   against it before changing the pin.
+- **A behavior-preserving change starts from golden outputs (MUST):** a
+  refactor, a move or a typing pass is "preserving" only if you can show it.
+  Before the first edit, capture outputs from the unchanged code on organizer
+  val data and a seeded smoke run: the scorers on seeded arrays, real cached
+  probabilities through the full S* pipeline, a CPU `configs/smoke.yml` run
+  (per-epoch metrics and `best.pt` tensors), `evaluate.py` with calibration,
+  `package-submission.py` then `run.py` `rank_gallery`, and model structure
+  (state-dict keys, freeze flags, layer-wise LR groups). Run that harness twice
+  on the unchanged code first and confirm the two captures are identical (the
+  absolute checkpoint path in `model_card.json` is the one run-specific
+  field); then compare bit-for-bit after every commit. The harness is
+  verification, not a test suite: keep it in a scratch directory, not in this
+  repo. The unit tests stayed green through changes that the goldens would
+  have caught, so do not treat a green `pytest` as proof of "unchanged".
+- **Read the diff after every scripted or regex edit (MUST):** a
+  `sed`/Python rename across files cannot tell the library's name from the
+  submission's deliberately different mirror of it. Renaming
+  `apply_per_attribute_temperatures` also rewrote
+  `submission/run.py`'s private `_apply_per_attribute_temperatures` inside a
+  test; only reading `git diff` caught it. Match the exact token, never a
+  substring, and read the result.
+- **Fix type errors in code, with these patterns (MUST):** no suppression
+  comment is ever the answer (see above). What worked for the 59 pyright
+  errors: `module.get_submodule("a.b")`, `get_parameter` and
+  `register_parameter` for dynamic `nn.Module` attributes (they carry a real
+  runtime check); `isinstance` narrowing at the call site instead of a `bool`
+  helper; a runtime-checkable `Protocol` instead of
+  `getattr(x, "name", None)`; a `Protocol` plus `cast` for duck-typed
+  backbones; a class-level annotation for a registered buffer; `cast` once,
+  naming the real type, when a library stub is wrong (`torch.jit.trace`,
+  `torch.hub.load`'s `trust_repo`); a `sys.platform` branch for POSIX-only
+  modules; `importlib.import_module` for a module that only exists on a
+  runtime path. Type a batch by what it can be (train batches may carry query
+  ids, eval batches never do) so `len(batch)` narrows.
+- **The edit hook rejects suppression-directive text anywhere (MUST):** also
+  inside a doc, a docstring, an emitted-code string or a scratch script. Say
+  "a type-checker suppression comment" in prose. Do not emit one into generated
+  notebook cells either; the exporter used to.
+- **Verification runs on CPU while another run owns the GPU (MUST):** export
+  `CUDA_VISIBLE_DEVICES=` (empty) for tests, smoke training, evaluation and
+  packaging. Training on the only GPU belongs to the experiment lane; a smoke
+  run that competes with it can OOM or slow a multi-hour run.
 - **No unrequested code (MUST):** only add files and logic the current task
   acceptance criteria require. Prefer a script under `scripts/` over new
   packages, fixtures, or README sections. Delete scaffolding that is not
