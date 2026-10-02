@@ -90,7 +90,11 @@ def download_images(starter: Path, data: Path) -> None:
 
 
 def main() -> None:
-    from src.wacv.config import DATA_ROOT_ENV, dataset_looks_present
+    from src.wacv.config import (
+        DATA_ROOT_ENV,
+        MAIN_CHECKOUT_DIRNAME,
+        dataset_looks_present,
+    )
 
     data = resolve_data_dir()
     local = (ROOT / "data").resolve()
@@ -105,6 +109,14 @@ def main() -> None:
             "truly need a re-fetch)"
         )
         return
+    # Experiment worktrees must never materialize a second organizer copy.
+    main_checkout = (ROOT.parent / MAIN_CHECKOUT_DIRNAME).resolve()
+    if main_checkout.is_dir() and main_checkout != ROOT.resolve():
+        data = main_checkout / "data"
+        print(
+            f"worktree download redirected to main checkout data/: {data}\n"
+            "  (see AGENTS.md 'Experiment worktrees: shared data root')"
+        )
     starter = clone_starter()
     copy_annotations(starter, data)
     download_images(starter, data)
