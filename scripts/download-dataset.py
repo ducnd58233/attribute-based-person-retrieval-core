@@ -7,40 +7,18 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 CACHE = ROOT / ".cache" / "UPAR-Challenge-2027"
 STARTER_URL = "https://github.com/speckean/UPAR-Challenge-2027.git"
-DATA_ROOT_ENV = "WACV_DATA_ROOT"
 
 
 def resolve_data_dir() -> Path:
-    """Prefer ``WACV_DATA_ROOT`` so worktrees share the main checkout dataset."""
-    override = os.environ.get(DATA_ROOT_ENV, "").strip()
-    if override:
-        return Path(override).expanduser().resolve()
-    return (ROOT / "data").resolve()
+    """Same rules as ``load_config``: env → local → sibling main checkout."""
+    from src.wacv.config import resolve_data_root
 
-
-def _dataset_looks_present(data: Path) -> bool:
-    """True when organizer annotations + at least one image corpus exist."""
-    annotations = data / "annotations"
-    image_roots = (
-        data / "Market1501",
-        data / "Market-1501-v15.09.15",
-        data / "PA100k",
-        data / "PETA",
-    )
-    return annotations.is_dir() and any(path.is_dir() for path in image_roots)
-
-
-def _sibling_main_data() -> Path | None:
-    """Main submodule ``data/`` when this checkout is an experiment worktree."""
-    main = ROOT.parent / "attribute-based-person-retrieval-core"
-    if not main.is_dir() or main.resolve() == ROOT.resolve():
-        return None
-    candidate = main / "data"
-    if _dataset_looks_present(candidate):
-        return candidate.resolve()
-    return None
+    return resolve_data_root(Path("data"), ROOT)
 
 
 def clone_starter() -> Path:
@@ -112,28 +90,21 @@ def download_images(starter: Path, data: Path) -> None:
 
 
 def main() -> None:
+    from src.wacv.config import DATA_ROOT_ENV, dataset_looks_present
+
     data = resolve_data_dir()
+    local = (ROOT / "data").resolve()
     if os.environ.get(DATA_ROOT_ENV, "").strip():
         print(f"{DATA_ROOT_ENV}={data}")
-    if _dataset_looks_present(data):
+    elif data != local:
+        print(f"using shared data root (sibling main checkout): {data}")
+    if dataset_looks_present(data):
         print(f"dataset already present under {data}; skipping download")
         print(
             f"(unset {DATA_ROOT_ENV} and remove data/ only if you "
             "truly need a re-fetch)"
         )
         return
-    shared = _sibling_main_data()
-    if shared is not None and data.resolve() != shared:
-        print(
-            "refusing to download a second organizer dataset copy.\n"
-            f"  this worktree would write: {data}\n"
-            f"  main checkout already has: {shared}\n"
-            "  fix: ln -sfn <main>/data data   OR   export "
-            f"{DATA_ROOT_ENV}={shared}\n"
-            "  see AGENTS.md 'Experiment worktrees: shared data root'.",
-            file=sys.stderr,
-        )
-        raise SystemExit(2)
     starter = clone_starter()
     copy_annotations(starter, data)
     download_images(starter, data)

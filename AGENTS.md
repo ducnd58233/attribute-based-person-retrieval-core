@@ -107,12 +107,16 @@ here.
 
   ```sh
   export WACV_DATA_ROOT="$(cd ../attribute-based-person-retrieval-core && pwd)/data"
-  # Windows Git Bash example:
-  # export WACV_DATA_ROOT="/d/competitions/ai/wacv/wacv2027/attribute-based-person-retrieval-workspace/attribute-based-person-retrieval-core/data"
   ```
 
-  `download-dataset.py` skips when annotations + an image corpus already
-  exist under the resolved root. Never delete the main worktree's `data/`.
+  If neither a local `data/` corpus nor `WACV_DATA_ROOT` is set,
+  `resolve_data_root` / `download-dataset.py` automatically fall back to
+  sibling `../attribute-based-person-retrieval-core/data` when that tree
+  already looks complete — so a fresh worktree must not re-download.
+  Still create the junction/symlink so tools that assume `./data` keep
+  working. `download-dataset.py` skips when annotations + an image corpus
+  already exist under the resolved root. Never delete the main worktree's
+  `data/`.
 - **Never commit trained model weights** to git history directly; use
   Git LFS, Hugging Face Hub, or another artifact store, and document
   wherever weights are pulled from in the model's own README.

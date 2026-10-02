@@ -12,6 +12,7 @@ from pydantic.types import NonNegativeInt, PositiveInt
 
 # Shared across git worktrees; see AGENTS.md "Experiment worktrees: shared data".
 DATA_ROOT_ENV = "WACV_DATA_ROOT"
+MAIN_CHECKOUT_DIRNAME = "attribute-based-person-retrieval-core"
 
 ModelName = Literal[
     "resnet50",
@@ -210,20 +211,56 @@ def _resolve(path: Path | None, project_root: Path) -> Path | None:
     return path if path.is_absolute() else (project_root / path).resolve()
 
 
-def resolve_data_root(configured: Path, project_root: Path) -> Path:
-    """Resolve ``data.root``, honoring ``WACV_DATA_ROOT`` when set.
+def dataset_looks_present(data: Path) -> bool:
+    """True when organizer annotations + at least one image corpus exist."""
+    annotations = data / "annotations"
+    image_roots = (
+        data / "Market1501",
+        data / "Market-1501-v15.09.15",
+        data / "PA100k",
+        data / "PETA",
+    )
+    return annotations.is_dir() and any(path.is_dir() for path in image_roots)
 
-    Experiment worktrees must share one dataset tree (the main checkout's
-    ``data/``). Set ``WACV_DATA_ROOT`` to that absolute path, or symlink
-    ``data -> ../attribute-based-person-retrieval-core/data``. Env wins over
-    a relative YAML ``data.root`` so worktrees do not re-download.
+
+def discover_main_checkout_data(project_root: Path) -> Path | None:
+    """Return sibling main checkout ``data/`` when this is an experiment worktree.
+
+    Layout expected under the parent workspace::
+
+        attribute-based-person-retrieval-core/data          # shared
+        attribute-based-person-retrieval-core-e34/          # worktree
+    """
+    root = project_root.resolve()
+    main = (root.parent / MAIN_CHECKOUT_DIRNAME).resolve()
+    if main == root:
+        return None
+    candidate = main / "data"
+    if dataset_looks_present(candidate):
+        return candidate
+    return None
+
+
+def resolve_data_root(configured: Path, project_root: Path) -> Path:
+    """Resolve ``data.root`` for shared worktree datasets.
+
+    Order: ``WACV_DATA_ROOT`` env → absolute YAML path → local relative path
+    when the dataset is already there → sibling main checkout ``data/`` when
+    present → otherwise the local relative path (download target).
+
+    Prefer a junction/symlink named ``data`` in new worktrees (see AGENTS.md).
     """
     override = os.environ.get(DATA_ROOT_ENV, "").strip()
     if override:
         return Path(override).expanduser().resolve()
-    resolved = _resolve(configured, project_root)
-    if resolved is None:
-        raise ValueError("data.root resolved to None")
+    if configured.is_absolute():
+        return configured.resolve()
+    resolved = (project_root / configured).resolve()
+    if dataset_looks_present(resolved):
+        return resolved
+    shared = discover_main_checkout_data(project_root)
+    if shared is not None:
+        return shared
     return resolved
 
 
