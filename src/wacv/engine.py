@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib
-import os
 import random
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -20,7 +19,7 @@ from tqdm.contrib.logging import logging_redirect_tqdm
 
 from src.wacv.checkpoint import CheckpointManager
 from src.wacv.config import DeviceName, ExperimentConfig
-from src.wacv.evaluation import compute_ranking_metrics
+from src.wacv.evaluation import RankingEvalData, compute_ranking_metrics
 from src.wacv.losses import asmr_semantic_margin_loss, hard_query_infonce
 from src.wacv.monitoring.tracking import RunTracker
 from src.wacv.query_adapter import AttributeModelWithHardQuery
@@ -34,15 +33,6 @@ class FitResult:
     end_epoch: int
     global_step: int
     best_metric: float
-
-
-@dataclass(frozen=True)
-class RankingEvalData:
-    """Track-2 val queries + gallery for per-epoch ranking metrics."""
-
-    queries: np.ndarray
-    gallery_attrs: np.ndarray
-    gallery_loader: BatchIterable
 
 
 @dataclass(frozen=True)
@@ -68,14 +58,6 @@ def resolve_device(requested: DeviceName) -> torch.device:
                 raise RuntimeError("TPU / torch_xla is not available") from None
             return torch.device("cpu")
     return torch.device(requested)
-
-
-def resolve_num_workers(requested: int) -> int:
-    """Cap DataLoader workers to ``cpu_count - 1`` (or 0 when requested ≤ 0)."""
-    if requested <= 0:
-        return 0
-    cpu_count = os.cpu_count() or 1
-    return min(requested, max(cpu_count - 1, 0))
 
 
 def seed_everything(seed: int) -> None:
@@ -266,9 +248,7 @@ class Trainer:
     def _ranking_metrics(self, ranking: RankingEvalData) -> dict[str, float]:
         return compute_ranking_metrics(
             self.ema_model,
-            ranking.gallery_loader,
-            ranking.queries,
-            ranking.gallery_attrs,
+            ranking,
             self.device,
             self.config.ranking,
             progress=False,

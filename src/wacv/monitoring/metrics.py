@@ -96,3 +96,17 @@ def evaluate_ranking(
         **{f"Rank-{k}": float(rank_hits[k].mean()) for k in RANK_K_VALUES},
         "mINP": float(inp.mean()),
     }
+
+
+def mean_accuracy(probabilities: np.ndarray, targets: np.ndarray) -> float:
+    """Mean over attributes of balanced accuracy at a 0.5 threshold (mA)."""
+    predictions = probabilities >= 0.5
+    positives = targets == 1
+    negatives = ~positives
+    true_positive_rate = (predictions & positives).sum(axis=0) / np.maximum(
+        positives.sum(axis=0), 1
+    )
+    true_negative_rate = ((~predictions) & negatives).sum(axis=0) / np.maximum(
+        negatives.sum(axis=0), 1
+    )
+    return float((0.5 * (true_positive_rate + true_negative_rate)).mean())

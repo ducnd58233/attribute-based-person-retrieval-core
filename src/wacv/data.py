@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import random
 from collections.abc import Sequence
 from io import BytesIO
@@ -11,11 +12,11 @@ import numpy as np
 import pandas as pd
 import torch
 from PIL import Image
-from torch.utils.data import Dataset
+from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 
 from src.wacv.attributes import attribute_names_from_columns
-from src.wacv.config import DegradeAugConfig
+from src.wacv.config import DataConfig, DegradeAugConfig
 
 KNOWN_DOMAINS: tuple[str, ...] = ("PA100k", "PETA", "Market1501")
 DEFAULT_IMAGE_SIZE: tuple[int, int] = (256, 128)
@@ -297,3 +298,30 @@ class AttributeDataset(Dataset):
         if self._query_ids is None:
             return transformed, attrs
         return transformed, attrs, self._query_ids[index]
+
+
+def resolve_num_workers(requested: int) -> int:
+    """Cap DataLoader workers to ``cpu_count - 1`` (or 0 when requested <= 0)."""
+    if requested <= 0:
+        return 0
+    cpu_count = os.cpu_count() or 1
+    return min(requested, max(cpu_count - 1, 0))
+
+
+def build_loader(
+    dataset: Dataset,
+    data_config: DataConfig,
+    device: torch.device,
+    *,
+    shuffle: bool,
+) -> DataLoader:
+    """DataLoader with the batch size and worker policy of ``data_config``."""
+    workers = resolve_num_workers(data_config.num_workers)
+    return DataLoader(
+        dataset,
+        batch_size=data_config.batch_size,
+        shuffle=shuffle,
+        num_workers=workers,
+        pin_memory=device.type == "cuda",
+        persistent_workers=workers > 0,
+    )

@@ -26,7 +26,11 @@ from pathlib import Path
 import torch
 from torch import nn
 
-from src.wacv.models._common import classification_head
+from src.wacv.models._common import (
+    build_layerwise_param_groups,
+    classification_head,
+    set_requires_grad,
+)
 
 DINOV2_HUB_REPO = "facebookresearch/dinov2"
 DINOV2_HUB_ENTRY = "dinov2_vitb14_reg"
@@ -66,13 +70,11 @@ class Dinov2AttributeClassifier(nn.Module):
 
     def freeze_backbone(self) -> None:
         """Freeze the vision tower (linear-probe stage)."""
-        for parameter in self.backbone.parameters():
-            parameter.requires_grad = False
+        set_requires_grad(self.backbone, False)
 
     def unfreeze_backbone(self) -> None:
         """Unfreeze the vision tower (full fine-tune stage)."""
-        for parameter in self.backbone.parameters():
-            parameter.requires_grad = True
+        set_requires_grad(self.backbone, True)
 
     def layerwise_param_groups(
         self,
@@ -82,51 +84,14 @@ class Dinov2AttributeClassifier(nn.Module):
         layer_decay: float,
     ) -> list[dict[str, object]]:
         """AdamW param groups with deeper ViT blocks keeping higher LR."""
-        blocks = list(self.backbone.blocks)
-        num_layers = len(blocks)
-        layer_id_by_param: dict[int, int] = {}
-        for index, block in enumerate(blocks):
-            for parameter in block.parameters():
-                layer_id_by_param[id(parameter)] = index
-        groups: list[dict[str, object]] = []
-        head_params = [p for p in self.head.parameters() if p.requires_grad]
-        if head_params:
-            groups.append(
-                {
-                    "params": head_params,
-                    "lr": learning_rate,
-                    "weight_decay": weight_decay,
-                }
-            )
-        early_params: list[nn.Parameter] = []
-        for _name, parameter in self.backbone.named_parameters():
-            if not parameter.requires_grad:
-                continue
-            if id(parameter) in layer_id_by_param:
-                continue
-            early_params.append(parameter)
-        if early_params:
-            scale = layer_decay**num_layers
-            groups.append(
-                {
-                    "params": early_params,
-                    "lr": learning_rate * scale,
-                    "weight_decay": weight_decay,
-                }
-            )
-        for index, block in enumerate(blocks):
-            params = [p for p in block.parameters() if p.requires_grad]
-            if not params:
-                continue
-            scale = layer_decay ** (num_layers - 1 - index)
-            groups.append(
-                {
-                    "params": params,
-                    "lr": learning_rate * scale,
-                    "weight_decay": weight_decay,
-                }
-            )
-        return groups
+        return build_layerwise_param_groups(
+            head=self.head,
+            tower=self.backbone,
+            blocks=self.backbone.blocks,
+            learning_rate=learning_rate,
+            weight_decay=weight_decay,
+            layer_decay=layer_decay,
+        )
 
 
 def load_dinov2_vitb14_reg_backbone(

@@ -10,8 +10,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
+import pandas as pd
 import torch
-from torch.utils.data import DataLoader
 
 if TYPE_CHECKING:
     from src.wacv.config import ExperimentConfig
@@ -66,28 +66,6 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _clear_hard_embeddings(
-    model: torch.nn.Module,
-    loader: DataLoader,
-    queries: np.ndarray,
-    device: torch.device,
-    *,
-    progress: bool,
-) -> tuple[np.ndarray, np.ndarray]:
-    from src.wacv.evaluation import predict_gallery_embeddings
-    from src.wacv.query_adapter import AttributeModelWithHardQuery
-
-    if not isinstance(model, AttributeModelWithHardQuery):
-        raise TypeError("clear_hard requires model.hard_query_adapter=true")
-    gallery_embeddings = predict_gallery_embeddings(
-        model, loader, device, progress=progress
-    )
-    query_tensor = torch.as_tensor(queries, dtype=torch.float32, device=device)
-    with torch.inference_mode():
-        query_embeddings = model.query_embeddings(query_tensor).cpu().numpy()
-    return gallery_embeddings, query_embeddings
-
-
 def _protocol_metrics_keys(
     raw: dict[str, float], wall_seconds: float
 ) -> dict[str, float]:
@@ -104,114 +82,46 @@ def _evaluate_protocol(
     config: ExperimentConfig,
     model: torch.nn.Module,
     device: torch.device,
-    ground_truth,
+    ground_truth: pd.DataFrame,
     queries: np.ndarray,
     attribute_names: tuple[str, ...],
     distance: str,
     calibration_out: Path | None = None,
 ) -> dict[str, float]:
-    from src.wacv.data import AttributeDataset, transforms_for_model
-    from src.wacv.engine import resolve_num_workers
-    from src.wacv.evaluation import (
-        apply_per_attribute_temperatures,
-        dual_softmax_rerank,
-        fit_per_attribute_temperatures,
-        mean_accuracy,
-        predict_probabilities,
-        ranking_distance,
-    )
-    from src.wacv.monitoring.metrics import evaluate_ranking
+    from src.wacv.data import AttributeDataset, build_loader, transforms_for_model
+    from src.wacv.evaluation import RankingEvalData, compute_ranking_metrics
 
-    workers = resolve_num_workers(config.data.num_workers)
-    loader = DataLoader(
-        AttributeDataset(
-            ground_truth,
-            config.data.root,
-            transforms_for_model(
-                config.model.name,
-                train=False,
-                image_size=(
-                    int(config.data.image_size[0]),
-                    int(config.data.image_size[1]),
-                ),
-            ),
-            attribute_names=attribute_names,
+    dataset = AttributeDataset(
+        ground_truth,
+        config.data.root,
+        transforms_for_model(
+            config.model.name, train=False, image_size=config.data.image_size
         ),
-        batch_size=config.data.batch_size,
-        num_workers=workers,
-        pin_memory=device.type == "cuda",
-        persistent_workers=workers > 0,
+        attribute_names=attribute_names,
+    )
+    data = RankingEvalData(
+        queries=queries,
+        gallery_attrs=ground_truth[list(attribute_names)].to_numpy(dtype=np.int64),
+        gallery_loader=build_loader(dataset, config.data, device, shuffle=False),
     )
     started = time.perf_counter()
-    probabilities = predict_probabilities(
+    metrics = compute_ranking_metrics(
         model,
-        loader,
+        data,
         device,
+        config.ranking.model_copy(update={"distance": distance}),
         progress=config.run.progress,
-        tta=config.inference.tta,
-        tta_scale=float(config.inference.tta_scale),
+        inference_config=config.inference,
+        calibrate=config.ranking.calibration == "per_attribute",
+        calibration_out=calibration_out,
     )
-    attributes = ground_truth[list(attribute_names)].to_numpy(dtype=np.int64)
-    score_temperature = float(config.ranking.temperature)
-    score_probabilities = probabilities
-    if config.ranking.calibration == "per_attribute":
-        temperatures = fit_per_attribute_temperatures(probabilities, attributes)
-        score_probabilities = apply_per_attribute_temperatures(
-            probabilities, temperatures
-        )
-        score_temperature = 1.0
-        if calibration_out is not None:
-            calibration_out.parent.mkdir(parents=True, exist_ok=True)
-            calibration_out.write_text(
-                json.dumps(
-                    {
-                        "mode": "per_attribute",
-                        "temperatures": [float(t) for t in temperatures.tolist()],
-                    },
-                    indent=2,
-                    sort_keys=True,
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-    gallery_embeddings = None
-    query_embeddings = None
-    if distance == "clear_hard":
-        gallery_embeddings, query_embeddings = _clear_hard_embeddings(
-            model,
-            loader,
-            queries,
-            device,
-            progress=config.run.progress,
-        )
-    distances = ranking_distance(
-        queries,
-        score_probabilities,
-        distance=distance,
-        temperature=score_temperature,
-        alpha=config.ranking.alpha,
-        gallery_embeddings=gallery_embeddings,
-        query_embeddings=query_embeddings,
-        clear_fusion=config.ranking.clear_fusion,
-    )
-    if config.ranking.query_norm == "dual_softmax":
-        distances = dual_softmax_rerank(
-            distances, tau=float(config.ranking.query_norm_tau)
-        )
-    metrics = evaluate_ranking(
-        queries,
-        attributes,
-        distances,
-    )
-    metrics["mA"] = mean_accuracy(probabilities, attributes)
-    wall_seconds = time.perf_counter() - started
-    return _protocol_metrics_keys(metrics, wall_seconds)
+    return _protocol_metrics_keys(metrics, time.perf_counter() - started)
 
 
 def _prepare_protocol_data(
     config: ExperimentConfig,
     protocol: ProtocolName,
-) -> tuple[object, np.ndarray, tuple[str, ...]]:
+) -> tuple[pd.DataFrame, np.ndarray, tuple[str, ...]]:
     from src.wacv.attributes import attribute_names_from_columns
     from src.wacv.data import (
         build_lodo_m_split,
