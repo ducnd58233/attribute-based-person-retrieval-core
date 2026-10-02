@@ -114,9 +114,9 @@ here.
   sibling `../attribute-based-person-retrieval-core/data` when that tree
   already looks complete — so a fresh worktree must not re-download.
   Still create the junction/symlink so tools that assume `./data` keep
-  working. `download-dataset.py` skips when annotations + an image corpus
-  already exist under the resolved root. Never delete the main worktree's
-  `data/`.
+  working. `download-dataset.py` skips only when annotations **and** all
+  three corpora (Market1501, PA100k, PETA) exist under the resolved root.
+  Never delete the main worktree's `data/`.
 - **Never commit trained model weights** to git history directly; use
   Git LFS, Hugging Face Hub, or another artifact store, and document
   wherever weights are pulled from in the model's own README.

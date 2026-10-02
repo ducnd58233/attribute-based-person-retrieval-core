@@ -212,15 +212,17 @@ def _resolve(path: Path | None, project_root: Path) -> Path | None:
 
 
 def dataset_looks_present(data: Path) -> bool:
-    """True when organizer annotations + at least one image corpus exist."""
-    annotations = data / "annotations"
-    image_roots = (
-        data / "Market1501",
-        data / "Market-1501-v15.09.15",
-        data / "PA100k",
-        data / "PETA",
-    )
-    return annotations.is_dir() and any(path.is_dir() for path in image_roots)
+    """True when annotations and all three organizer image corpora exist.
+
+    Requires Market1501 (either folder name), PA100k, and PETA — not just one
+    corpus — so a partial extract cannot skip the rest of the download.
+    """
+    if not (data / "annotations").is_dir():
+        return False
+    market = (data / "Market1501").is_dir() or (data / "Market-1501-v15.09.15").is_dir()
+    pa100k = (data / "PA100k").is_dir() or (data / "PA100K").is_dir()
+    peta = (data / "PETA").is_dir()
+    return market and pa100k and peta
 
 
 def discover_main_checkout_data(project_root: Path) -> Path | None:

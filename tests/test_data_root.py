@@ -17,16 +17,24 @@ from src.wacv.config import (
 def _plant_dataset(data: Path) -> None:
     (data / "annotations").mkdir(parents=True)
     (data / "Market1501").mkdir(parents=True)
+    (data / "PA100k").mkdir(parents=True)
+    (data / "PETA").mkdir(parents=True)
     (data / "annotations" / "dummy.txt").write_text("x", encoding="utf-8")
 
 
-def test_dataset_looks_present_requires_annotations_and_corpus(tmp_path: Path) -> None:
+def test_dataset_looks_present_requires_annotations_and_all_corpora(
+    tmp_path: Path,
+) -> None:
     data = tmp_path / "data"
     data.mkdir()
     assert not dataset_looks_present(data)
     (data / "annotations").mkdir()
     assert not dataset_looks_present(data)
     (data / "PA100k").mkdir()
+    assert not dataset_looks_present(data)
+    (data / "Market1501").mkdir()
+    assert not dataset_looks_present(data)
+    (data / "PETA").mkdir()
     assert dataset_looks_present(data)
 
 
