@@ -49,6 +49,7 @@ def test_predict_gallery_prints_progress_per_batch(
     module = _load_run_module()
     module._STATE["model"] = _FakeModel()
     module._STATE["device"] = torch.device("cpu")
+    module._STATE["card"] = {}
     monkeypatch.setattr(module, "BATCH_SIZE", 2)
     gallery = _make_gallery(tmp_path, count=5)
 
@@ -68,6 +69,7 @@ def test_predict_gallery_progress_mentions_total(
     module = _load_run_module()
     module._STATE["model"] = _FakeModel()
     module._STATE["device"] = torch.device("cpu")
+    module._STATE["card"] = {}
     monkeypatch.setattr(module, "BATCH_SIZE", 3)
     gallery = _make_gallery(tmp_path, count=3)
 
@@ -75,3 +77,35 @@ def test_predict_gallery_progress_mentions_total(
 
     output = capsys.readouterr().out
     assert "3/3" in output
+
+
+def test_rank_gallery_logs_device_and_phase_seconds(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_run_module()
+    module._STATE["model"] = _FakeModel()
+    module._STATE["device"] = torch.device("cpu")
+    module._STATE["card"] = {
+        "ranking_distance": "l1",
+        "ranking_temperature": 1.5,
+        "inference_tta": ["identity"],
+    }
+    monkeypatch.setattr(module, "BATCH_SIZE", 2)
+    gallery = _make_gallery(tmp_path, count=4)
+    sample = {
+        "gallery": gallery,
+        "queries": [[1, 0, 0], [0, 1, 0]],
+    }
+
+    result = module.rank_gallery(sample)
+
+    assert "distances" in result
+    output = capsys.readouterr().out
+    assert "phase_seconds" in output
+    assert "decode=" in output
+    assert "forward=" in output
+    assert "scoring=" in output
+    assert "image_path" not in output
+    assert ".jpg" not in output

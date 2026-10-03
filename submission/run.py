@@ -7,6 +7,7 @@ Weights live under assets/ (written by scripts/package_submission.py).
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any, Protocol, cast
 
@@ -214,19 +215,21 @@ def _image_hw_from_card(card: dict[str, Any]) -> tuple[int, int]:
     return int(size[0]), int(size[1])
 
 
-def _cuda_forward_works(model: nn.Module, card: dict[str, Any]) -> bool:
-    """True if a real CUDA forward works (capability mismatches fail here)."""
+def _cuda_forward_probe(
+    model: nn.Module, card: dict[str, Any]
+) -> tuple[bool, str | None]:
+    """Return whether a real CUDA forward works, plus the failure text if not."""
     if not torch.cuda.is_available():
-        return False
+        return False, None
     height, width = _image_hw_from_card(card)
     try:
         probe = torch.zeros(1, 3, height, width, device="cuda")
         with torch.inference_mode():
             model(probe)
         torch.cuda.synchronize()
-    except RuntimeError:
-        return False
-    return True
+    except RuntimeError as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    return True, None
 
 
 def load_model() -> None:
@@ -236,6 +239,11 @@ def load_model() -> None:
     with CARD_PATH.open(encoding="utf-8") as handle:
         card = json.load(handle)
     prefer_cuda = torch.cuda.is_available()
+    print(
+        f"[run] cuda_available={prefer_cuda} "
+        f"torch_threads={torch.get_num_threads()}",
+        flush=True,
+    )
     load_device = torch.device("cuda" if prefer_cuda else "cpu")
     if str(card.get("weight_format", "state_dict")) == "torchscript":
         model = torch.jit.load(WEIGHTS_PATH, map_location=load_device)
@@ -246,9 +254,14 @@ def load_model() -> None:
         model.to(load_device)
     model.eval()
     device = load_device
-    if prefer_cuda and not _cuda_forward_works(model, card):
-        model = model.to(torch.device("cpu"))
-        device = torch.device("cpu")
+    if prefer_cuda:
+        works, cuda_error = _cuda_forward_probe(model, card)
+        if not works:
+            if cuda_error is not None:
+                print(f"[run] cuda_forward_failed {cuda_error}", flush=True)
+            model = model.to(torch.device("cpu"))
+            device = torch.device("cpu")
+    print(f"[run] device={device.type}", flush=True)
     _STATE["model"] = model
     _STATE["device"] = device
     _STATE["card"] = card
@@ -256,6 +269,7 @@ def load_model() -> None:
 
 
 def _iter_gallery_tensors(gallery: list[dict[str, Any]], device: torch.device) -> Any:
+    """Yield ``(batch_tensor, decode_seconds)``; never log image paths or sizes."""
     total = len(gallery)
     transform = _STATE.get("transform", IMAGE_TRANSFORM)
     if not isinstance(transform, transforms.Compose):
@@ -263,6 +277,7 @@ def _iter_gallery_tensors(gallery: list[dict[str, Any]], device: torch.device) -
     for start in range(0, total, BATCH_SIZE):
         chunk = gallery[start : start + BATCH_SIZE]
         tensors: list[torch.Tensor] = []
+        decode_started = time.perf_counter()
         for item in chunk:
             image = Image.open(item["image_path"]).convert("RGB")
             tensor = transform(image)
@@ -270,9 +285,10 @@ def _iter_gallery_tensors(gallery: list[dict[str, Any]], device: torch.device) -
                 raise TypeError("Image transform must return a tensor")
             tensors.append(tensor)
         images = torch.stack(tensors, dim=0).to(device, non_blocking=True)
+        decode_seconds = time.perf_counter() - decode_started
         done = min(start + BATCH_SIZE, total)
         print(f"[rank_gallery] {done}/{total} gallery images processed", flush=True)
-        yield images
+        yield images, decode_seconds
 
 
 def _apply_tta_view(
@@ -311,8 +327,12 @@ def _predict_gallery(gallery: list[dict[str, Any]]) -> np.ndarray:
         tta_views = ["identity"]
     tta_scale = float(card.get("inference_tta_scale", 1.15))
     batches: list[np.ndarray] = []
+    decode_seconds = 0.0
+    forward_seconds = 0.0
     with torch.inference_mode():
-        for images in _iter_gallery_tensors(gallery, device):
+        for images, batch_decode in _iter_gallery_tensors(gallery, device):
+            decode_seconds += batch_decode
+            forward_started = time.perf_counter()
             probs_sum: torch.Tensor | None = None
             for view in tta_views:
                 logits = model(_apply_tta_view(images, view, scale=tta_scale))
@@ -320,8 +340,11 @@ def _predict_gallery(gallery: list[dict[str, Any]]) -> np.ndarray:
                 probs_sum = probs if probs_sum is None else probs_sum + probs
             assert probs_sum is not None
             batches.append((probs_sum / float(len(tta_views))).float().cpu().numpy())
+            forward_seconds += time.perf_counter() - forward_started
     if not batches:
         raise ValueError("Gallery is empty")
+    _STATE["last_decode_seconds"] = decode_seconds
+    _STATE["last_forward_seconds"] = forward_seconds
     return np.concatenate(batches, axis=0)
 
 
@@ -335,7 +358,7 @@ def _predict_gallery_embeddings(gallery: list[dict[str, Any]]) -> np.ndarray:
         raise RuntimeError("Model failed to load")
     batches: list[np.ndarray] = []
     with torch.inference_mode():
-        for images in _iter_gallery_tensors(gallery, device):
+        for images, _decode_seconds in _iter_gallery_tensors(gallery, device):
             batches.append(model.gallery_embeddings(images).float().cpu().numpy())
     if not batches:
         raise ValueError("Gallery is empty")
@@ -634,6 +657,7 @@ def rank_gallery(sample: dict[str, Any]) -> dict[str, Any]:
         if temps is not None and temps.shape[0] == probabilities.shape[1]:
             probabilities = _apply_per_attribute_temperatures(probabilities, temps)
             temperature = 1.0
+    scoring_started = time.perf_counter()
     distances = _score_gallery_distances(
         queries,
         probabilities,
@@ -645,4 +669,12 @@ def rank_gallery(sample: dict[str, Any]) -> dict[str, Any]:
         distances = _dual_softmax_rerank(
             distances, float(card.get("ranking_query_norm_tau", 0.05))
         )
+    scoring_seconds = time.perf_counter() - scoring_started
+    decode_seconds = float(_STATE.get("last_decode_seconds", 0.0))
+    forward_seconds = float(_STATE.get("last_forward_seconds", 0.0))
+    print(
+        f"[run] phase_seconds decode={decode_seconds:.3f} "
+        f"forward={forward_seconds:.3f} scoring={scoring_seconds:.3f}",
+        flush=True,
+    )
     return {"distances": distances}
