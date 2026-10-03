@@ -63,11 +63,21 @@ def parse_args() -> argparse.Namespace:
         help="a cell is eligible only if no other group's odd-query mADM drops "
         "by more than this",
     )
+    parser.add_argument(
+        "--degrade",
+        choices=("none", "L1", "L2", "L3"),
+        default="none",
+        help="V-deg fixed severity on val images (T28/E81); none = clean eval",
+    )
     return parser.parse_args()
 
 
 def _predict_to_cache(
-    config: ExperimentConfig, checkpoint: Path, cache: Path
+    config: ExperimentConfig,
+    checkpoint: Path,
+    cache: Path,
+    *,
+    val_degrade: str | None = None,
 ) -> dict[str, np.ndarray]:
     from src.wacv.attributes import attribute_names_from_columns
     from src.wacv.checkpoint import load_model_weights
@@ -91,7 +101,12 @@ def _predict_to_cache(
     model = build_model(model_config, num_attributes=len(names)).to(device)
     load_model_weights(checkpoint.resolve(), model, map_location=device)
     loader = build_eval_loader(
-        ground_truth, names, config.model.name, config.data, device
+        ground_truth,
+        names,
+        config.model.name,
+        config.data,
+        device,
+        val_degrade=val_degrade,
     )
     progress = config.run.progress
     arrays = {
@@ -187,10 +202,13 @@ def main() -> None:
     configure_default_logging()
     args = parse_args()
     config = load_config(args.config)
+    val_degrade = None if args.degrade == "none" else args.degrade
     cached = (
         dict(np.load(args.cache))
         if args.cache.is_file()
-        else _predict_to_cache(config, args.checkpoint, args.cache)
+        else _predict_to_cache(
+            config, args.checkpoint, args.cache, val_degrade=val_degrade
+        )
     )
     ranking = config.ranking.model_copy(update={"neighbour_smooth": None})
     groups = _groups(cached["images"], args.gallery)
