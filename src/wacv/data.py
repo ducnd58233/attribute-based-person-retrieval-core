@@ -269,6 +269,25 @@ class AttributeDataset(Dataset):
         return transformed, attrs, self._query_ids[index]
 
 
+def build_eval_loader(
+    gt: pd.DataFrame,
+    attribute_names: tuple[str, ...],
+    model_name: str,
+    data_config: DataConfig,
+    device: torch.device,
+) -> DataLoader:
+    """Un-shuffled eval loader over ``gt`` with the model family's eval transform."""
+    dataset = AttributeDataset(
+        gt,
+        data_config.root,
+        transforms_for_model(
+            model_name, train=False, image_size=data_config.image_size
+        ),
+        attribute_names=attribute_names,
+    )
+    return build_loader(dataset, data_config, device, shuffle=False)
+
+
 def resolve_num_workers(requested: int) -> int:
     """Cap DataLoader workers to ``cpu_count - 1`` (or 0 when requested <= 0)."""
     if requested <= 0:

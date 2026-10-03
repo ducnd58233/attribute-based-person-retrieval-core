@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+from typing import Protocol, runtime_checkable
 
 import numpy as np
 import torch
@@ -77,6 +78,38 @@ def predict_probabilities(
                 probs_sum = probs if probs_sum is None else probs_sum + probs
             assert probs_sum is not None
             batches.append((probs_sum / float(len(views))).cpu().numpy())
+    if not batches:
+        raise ValueError("Evaluation loader is empty")
+    return np.concatenate(batches, axis=0)
+
+
+@runtime_checkable
+class FeatureEncoder(Protocol):
+    """A classifier that exposes its pooled image features before the head."""
+
+    def encode_features(self, images: torch.Tensor) -> torch.Tensor: ...
+
+
+def predict_pooled_embeddings(
+    model: nn.Module,
+    loader: Iterable[tuple[torch.Tensor, torch.Tensor]],
+    device: torch.device,
+    *,
+    progress: bool,
+) -> np.ndarray:
+    """Pooled backbone features (identity view) for latent-space methods."""
+    model.eval()
+    root = unwrap_eval_module(model)
+    if not isinstance(root, FeatureEncoder):
+        raise TypeError(
+            f"{type(root).__name__} has no encode_features; the CLIP and DINOv2 "
+            "classifiers do"
+        )
+    batches: list[np.ndarray] = []
+    with torch.inference_mode():
+        for images, _ in tqdm(loader, desc="pooled", disable=not progress):
+            features = root.encode_features(images.to(device, non_blocking=True))
+            batches.append(features.float().cpu().numpy())
     if not batches:
         raise ValueError("Evaluation loader is empty")
     return np.concatenate(batches, axis=0)
