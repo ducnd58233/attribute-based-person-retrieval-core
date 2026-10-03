@@ -114,6 +114,13 @@ class ModelConfig(StrictConfig):
             "When set, skip hub weight download and load this file instead."
         ),
     )
+    text_anchor_init: bool = Field(
+        default=False,
+        description=(
+            "If true (CLIP only), initialise the attribute Linear head from "
+            "open_clip text embeddings of (pos−neg) attribute prompts before LP-FT."
+        ),
+    )
 
 
 class DegradeAugConfig(StrictConfig):

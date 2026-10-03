@@ -182,6 +182,28 @@ def maybe_wrap_logit_adjust(
     return LogitAdjustedLoss(criterion, offset)
 
 
+def _peek_resume_next_epoch(resume: Path | None) -> int | None:
+    """Return checkpoint next_epoch without mutating model/optimizer state."""
+    if resume is None or not resume.is_file():
+        return None
+    checkpoint = torch.load(resume, map_location="cpu", weights_only=True)
+    return int(checkpoint["epoch"]) + 1
+
+
+def _build_ft_optimizer(
+    model: ClipAttributeClassifier | Dinov2AttributeClassifier,
+    config: ExperimentConfig,
+) -> torch.optim.Optimizer:
+    """Stage-2 AdamW with layer-wise LR (matches an FT-stage checkpoint)."""
+    model.unfreeze_backbone()
+    ft_groups = model.layerwise_param_groups(
+        learning_rate=config.optimization.learning_rate,
+        weight_decay=config.optimization.weight_decay,
+        layer_decay=config.optimization.layer_decay,
+    )
+    return torch.optim.AdamW(ft_groups)
+
+
 def _run_linear_probe_stage(
     *,
     model: ClipAttributeClassifier | Dinov2AttributeClassifier,
@@ -197,6 +219,24 @@ def _run_linear_probe_stage(
     from src.wacv.engine import Trainer
 
     train_loader, val_loader, ranking, asmr_context = fit_data
+    resume_path = config.run.resume if isinstance(config.run.resume, Path) else None
+    resume_next = _peek_resume_next_epoch(resume_path)
+    if resume_next is not None and resume_next >= config.optimization.lp_epochs:
+        # FT checkpoint already past LP; loading it into the LP optimizer fails
+        # (different param-group counts). Skip LP and resume FT directly.
+        tracker.logger.info(
+            "LP-FT skip stage 1: resume next_epoch=%d >= lp_epochs=%d",
+            resume_next,
+            config.optimization.lp_epochs,
+        )
+        tracker.logger.info(
+            "LP-FT stage 2: full FT epochs=%d base_lr=%s layer_decay=%s",
+            config.optimization.epochs,
+            config.optimization.learning_rate,
+            config.optimization.layer_decay,
+        )
+        return _build_ft_optimizer(model, config)
+
     model.freeze_backbone()
     lp_config = config.model_copy(
         update={
@@ -204,6 +244,10 @@ def _run_linear_probe_stage(
                 update={"epochs": config.optimization.lp_epochs}
             )
         }
+    )
+    # LP must not load an FT resume path into the LP optimizer.
+    lp_config = lp_config.model_copy(
+        update={"run": config.run.model_copy(update={"resume": None})}
     )
     lp_optimizer = torch.optim.AdamW(
         (p for p in model.parameters() if p.requires_grad),
@@ -230,19 +274,46 @@ def _run_linear_probe_stage(
         lp_config,
         asmr_context=asmr_context,
     ).fit(train_loader, val_loader, ranking=ranking)
-    model.unfreeze_backbone()
-    ft_groups = model.layerwise_param_groups(
-        learning_rate=config.optimization.learning_rate,
-        weight_decay=config.optimization.weight_decay,
-        layer_decay=config.optimization.layer_decay,
-    )
     tracker.logger.info(
         "LP-FT stage 2: full FT epochs=%d base_lr=%s layer_decay=%s",
         config.optimization.epochs,
         config.optimization.learning_rate,
         config.optimization.layer_decay,
     )
-    return torch.optim.AdamW(ft_groups)
+    return _build_ft_optimizer(model, config)
+
+
+def _maybe_text_anchor_init(
+    model: ClipAttributeClassifier | Dinov2AttributeClassifier,
+    config: ExperimentConfig,
+    device: torch.device,
+) -> None:
+    """Initialise CLIP heads from text embeddings when configured."""
+    if not config.model.text_anchor_init:
+        return
+    from src.wacv.attributes import attribute_names_from_columns
+    from src.wacv.data import filter_gt_by_domains, load_gt
+    from src.wacv.models.clip import ClipAttributeClassifier
+    from src.wacv.models.text_anchor import init_clip_head_from_text
+
+    if not isinstance(model, ClipAttributeClassifier):
+        raise TypeError(
+            "model.text_anchor_init requires a ClipAttributeClassifier, "
+            f"got {type(model)}"
+        )
+    train_gt = filter_gt_by_domains(
+        load_gt(config.data.root / "annotations" / "task1" / "train" / "gt.csv"),
+        config.data.train_domains,
+    )
+    attribute_names = attribute_names_from_columns(
+        tuple(str(c) for c in train_gt.columns)
+    )
+    init_clip_head_from_text(
+        model,
+        attribute_names,
+        model_name=config.model.name,
+        device=device,
+    )
 
 
 def main() -> None:
@@ -272,6 +343,7 @@ def main() -> None:
     ranking = build_ranking_eval(config, device)
 
     model = build_model(config.model, num_attributes=num_attributes).to(device)
+    _maybe_text_anchor_init(model, config, device)
     if config.run.init_weights is not None:
         load_model_weights(
             config.run.init_weights.resolve(),
