@@ -217,6 +217,27 @@ class InferenceConfig(StrictConfig):
     )
 
 
+class NeighbourSmoothConfig(StrictConfig):
+    """Latent kNN smoothing of gallery attribute probabilities at inference."""
+
+    k: PositiveInt = Field(
+        default=5, description="Nearest gallery neighbours per image, self excluded."
+    )
+    beta: float = Field(
+        default=0.7,
+        gt=0.0,
+        le=1.0,
+        description="Blend weight: p' = (1 - beta) * p + beta * mean(neighbours).",
+    )
+    min_similarity: float = Field(
+        default=0.95,
+        ge=-1.0,
+        le=1.0,
+        description="Cosine gate: neighbours below it are dropped, and an image "
+        "with none left keeps its own probabilities. -1 disables the gate.",
+    )
+
+
 class RankingConfig(StrictConfig):
     """How gallery attribute probabilities become query distances."""
 
@@ -253,6 +274,14 @@ class RankingConfig(StrictConfig):
         le=1.0,
         description="Weight on CLEAR cosine term when distance=clear_hard "
         "(rest is Specker L1 on calibrated probs).",
+    )
+    neighbour_smooth: NeighbourSmoothConfig | None = Field(
+        default=None,
+        description="Blend each gallery image's probabilities with its nearest "
+        "neighbours in the pooled-embedding space. None disables smoothing. "
+        "package-submission enables E74b defaults for CLIP/DINOv2 unless "
+        "--no-neighbour-smooth is passed or this field is left null and the "
+        "flag is used; set an explicit block to override k/beta/gate.",
     )
 
 

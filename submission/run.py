@@ -296,7 +296,10 @@ def _apply_tta_view(
     raise ValueError(f"Unknown TTA view {view!r}")
 
 
-def _predict_gallery(gallery: list[dict[str, Any]]) -> np.ndarray:
+def _predict_gallery(
+    gallery: list[dict[str, Any]], *, with_features: bool = False
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """Probabilities, and identity-view pooled features when ``with_features``."""
     load_model()
     model = _STATE["model"]
     device = _STATE["device"]
@@ -309,20 +312,66 @@ def _predict_gallery(gallery: list[dict[str, Any]]) -> np.ndarray:
         tta_views = [str(v) for v in raw_tta]
     else:
         tta_views = ["identity"]
+    if with_features and "identity" not in tta_views:
+        raise ValueError("neighbour_smooth needs the identity view in inference_tta")
     tta_scale = float(card.get("inference_tta_scale", 1.15))
     batches: list[np.ndarray] = []
+    feature_batches: list[np.ndarray] = []
     with torch.inference_mode():
         for images in _iter_gallery_tensors(gallery, device):
             probs_sum: torch.Tensor | None = None
             for view in tta_views:
-                logits = model(_apply_tta_view(images, view, scale=tta_scale))
+                output = model(_apply_tta_view(images, view, scale=tta_scale))
+                logits = output[0] if isinstance(output, tuple) else output
+                if with_features and view == "identity":
+                    if not isinstance(output, tuple):
+                        raise TypeError("model must return (logits, features)")
+                    feature_batches.append(output[1].float().cpu().numpy())
                 probs = torch.sigmoid(logits)
                 probs_sum = probs if probs_sum is None else probs_sum + probs
             assert probs_sum is not None
             batches.append((probs_sum / float(len(tta_views))).float().cpu().numpy())
     if not batches:
         raise ValueError("Gallery is empty")
-    return np.concatenate(batches, axis=0)
+    features = np.concatenate(feature_batches, axis=0) if with_features else None
+    return np.concatenate(batches, axis=0), features
+
+
+def _neighbour_smooth(
+    probabilities: np.ndarray, features: np.ndarray, smooth: dict[str, Any]
+) -> np.ndarray:
+    """Blend each image with its nearest gallery neighbours (cosine, gated).
+
+    Mirrors ``src/wacv/evaluation/smoothing.py``; this file ships alone.
+    """
+    count = len(probabilities)
+    k = min(int(smooth["k"]), count - 1)
+    if k < 1:
+        return probabilities
+    beta = float(smooth["beta"])
+    gate = float(smooth["min_similarity"])
+    unit = features.astype(np.float32)
+    unit /= np.maximum(np.linalg.norm(unit, axis=1, keepdims=True), 1e-12)
+    smoothed = probabilities.copy()
+    chunk = 2048
+    for start in range(0, count, chunk):
+        similarity = unit[start : start + chunk] @ unit.T
+        rows = np.arange(similarity.shape[0])
+        similarity[rows, start + rows] = -np.inf
+        nearest = np.argpartition(-similarity, k - 1, axis=1)[:, :k]
+        kept = np.take_along_axis(similarity, nearest, axis=1) >= gate
+        weights = kept.astype(np.float32)
+        kept_count = weights.sum(axis=1)
+        has_neighbours = kept_count > 0
+        neighbour_sum = (probabilities[nearest] * weights[..., None]).sum(axis=1)
+        neighbour_mean = (
+            neighbour_sum[has_neighbours] / kept_count[has_neighbours, None]
+        )
+        block = smoothed[start : start + similarity.shape[0]]
+        block[has_neighbours] = (1.0 - beta) * block[
+            has_neighbours
+        ] + beta * neighbour_mean
+    return smoothed
 
 
 def _predict_gallery_embeddings(gallery: list[dict[str, Any]]) -> np.ndarray:
@@ -625,9 +674,15 @@ def _score_gallery_distances(
 
 def rank_gallery(sample: dict[str, Any]) -> dict[str, Any]:
     """Return distances between query vectors and gallery probabilities."""
-    probabilities = _predict_gallery(sample["gallery"])
-    queries = np.asarray(sample["queries"], dtype=np.float32)
+    load_model()
     card = _STATE["card"] if isinstance(_STATE["card"], dict) else {}
+    smooth = card.get("neighbour_smooth")
+    probabilities, features = _predict_gallery(
+        sample["gallery"], with_features=isinstance(smooth, dict)
+    )
+    if isinstance(smooth, dict) and features is not None:
+        probabilities = _neighbour_smooth(probabilities, features, smooth)
+    queries = np.asarray(sample["queries"], dtype=np.float32)
     temperature = float(card.get("ranking_temperature", 1.5))
     if str(card.get("ranking_calibration", "none")) == "per_attribute":
         temps = _load_calibration_temperatures()
