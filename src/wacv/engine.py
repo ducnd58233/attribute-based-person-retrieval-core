@@ -20,7 +20,11 @@ from tqdm.contrib.logging import logging_redirect_tqdm
 from src.wacv.checkpoint import CheckpointManager
 from src.wacv.config import DeviceName, ExperimentConfig
 from src.wacv.evaluation import RankingEvalData, compute_ranking_metrics
-from src.wacv.losses import asmr_semantic_margin_loss, hard_query_infonce
+from src.wacv.losses import (
+    asmr_semantic_margin_loss,
+    hard_query_infonce,
+    soft_hard_kd_loss,
+)
 from src.wacv.monitoring.tracking import RunTracker
 from src.wacv.query_adapter import AttributeModelWithHardQuery
 
@@ -41,6 +45,22 @@ class AsmrTrainContext:
     """Task-2 train query vectors indexed by ids.csv (train split only)."""
 
     train_query_vectors: torch.Tensor
+
+
+@dataclass(frozen=True)
+class DistillTrainContext:
+    """Frozen teacher used for soft+hard KD (train-only; not packaged)."""
+
+    teacher: nn.Module
+    teacher_image_size: tuple[int, int]
+
+
+@dataclass(frozen=True)
+class TrainerAuxContext:
+    """Optional train-only supervision (ASMR queries and/or KD teacher)."""
+
+    asmr: AsmrTrainContext | None = None
+    distill: DistillTrainContext | None = None
 
 
 def resolve_device(requested: DeviceName) -> torch.device:
@@ -81,7 +101,7 @@ class Trainer:
         device: torch.device,
         tracker: RunTracker,
         config: ExperimentConfig,
-        asmr_context: AsmrTrainContext | None = None,
+        aux: TrainerAuxContext | None = None,
     ) -> None:
         self.model = model
         self.optimizer = optimizer
@@ -90,9 +110,13 @@ class Trainer:
         self.device = device
         self.tracker = tracker
         self.config = config
-        self._asmr_context = asmr_context
-        if config.losses.asmr_aux.weight > 0.0 and asmr_context is None:
+        aux_context = aux if aux is not None else TrainerAuxContext()
+        self._asmr_context = aux_context.asmr
+        self._distill_context = aux_context.distill
+        if config.losses.asmr_aux.weight > 0.0 and self._asmr_context is None:
             raise ValueError("losses.asmr_aux requires AsmrTrainContext")
+        if config.losses.distill.soft_weight > 0.0 and self._distill_context is None:
+            raise ValueError("losses.distill requires DistillTrainContext")
         amp_enabled = config.optimization.amp and device.type == "cuda"
         self.scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
         self.ema_model = AveragedModel(
@@ -129,6 +153,23 @@ class Trainer:
         query_emb = root.query_embeddings(query_bits)
         return asmr_semantic_margin_loss(gallery_emb, query_emb, inverse, margins)
 
+    def _teacher_logits(self, batch_images: torch.Tensor) -> torch.Tensor:
+        if self._distill_context is None:
+            raise RuntimeError("distill context missing")
+        teacher = self._distill_context.teacher
+        height, width = self._distill_context.teacher_image_size
+        if batch_images.shape[-2:] != (height, width):
+            teacher_images = torch.nn.functional.interpolate(
+                batch_images,
+                size=(height, width),
+                mode="bilinear",
+                align_corners=False,
+            )
+        else:
+            teacher_images = batch_images
+        with torch.inference_mode():
+            return teacher(teacher_images)
+
     def _batch_training_loss(
         self,
         batch_images: torch.Tensor,
@@ -138,7 +179,20 @@ class Trainer:
         smoothing = self.config.optimization.label_smoothing
         loss_targets = batch_targets * (1.0 - smoothing) + 0.5 * smoothing
         logits = self.model(batch_images)
-        loss = self.criterion(logits, loss_targets)
+        distill = self.config.losses.distill
+        if distill.soft_weight > 0.0:
+            teacher_logits = self._teacher_logits(batch_images)
+            loss = soft_hard_kd_loss(
+                logits,
+                loss_targets,
+                teacher_logits,
+                hard_criterion=self.criterion,
+                soft_weight=distill.soft_weight,
+                hard_weight=distill.hard_weight,
+                temperature=float(distill.temperature),
+            )
+        else:
+            loss = self.criterion(logits, loss_targets)
         root = self.model
         match_weight = self.config.optimization.query_match_weight
         if match_weight > 0.0:

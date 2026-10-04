@@ -1,0 +1,74 @@
+# E40 phase-2 — soft+hard KD student CLIP ViT-B/16 from L/14 teacher (H40).
+# Teacher: sibling worktree core-e40 runs/e40_clip_l14_teacher/checkpoints/best.pt
+# Student packageable alone for CPU Codabench (target T_est <= 3200 s).
+# Licence: OpenAI CLIP (MIT); organizer PA100k+PETA only; no test images.
+
+model:
+  name: clip_vit_b16
+  pretrained: true
+  dropout: 0.1
+
+data:
+  root: data
+  batch_size: 8
+  num_workers: 4
+  limit: null
+  train_augmentation: true
+  image_size: [256, 128]
+  train_domains:
+    - PA100k
+    - PETA
+
+optimization:
+  epochs: 8
+  learning_rate: 0.00001
+  weight_decay: 0.01
+  pos_weight_clip: 10.0
+  amp: true
+  grad_clip_norm: 1.0
+  ema_decay: 0.999
+  scheduler_factor: 0.1
+  scheduler_patience: 2
+  label_smoothing: 0.05
+  early_stop_patience: 4
+  lp_ft: true
+  lp_epochs: 2
+  lp_learning_rate: 0.001
+  layer_decay: 0.65
+
+losses:
+  distill:
+    soft_weight: 0.5
+    hard_weight: 0.5
+    temperature: 2.0
+    teacher:
+      checkpoint: ../attribute-based-person-retrieval-core-e40/runs/e40_clip_l14_teacher/checkpoints/best.pt
+      name: clip_vit_l14
+      pretrained: false
+      dropout: 0.1
+      freeze_backbone: true
+      lora_rank: 16
+      lora_alpha: 16.0
+      image_size: [224, 112]
+
+run:
+  name: e40_distill_b16
+  output_dir: runs
+  resume: true
+  seed: 42
+  device: auto
+  progress: true
+
+ranking:
+  distance: hybrid
+  temperature: 1.0
+  alpha: 0.5
+  query_norm: dual_softmax
+  query_norm_tau: 0.05
+
+inference:
+  tta:
+    - identity
+    - hflip
+    - scale_crop
+  tta_scale: 1.15

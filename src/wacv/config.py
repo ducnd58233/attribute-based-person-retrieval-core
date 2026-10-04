@@ -156,8 +156,39 @@ class AsmrAuxConfig(StrictConfig):
     weight: float = Field(default=0.0, ge=0.0, le=5.0)
 
 
+class DistillTeacherConfig(StrictConfig):
+    """Frozen teacher tower used only during soft+hard KD training."""
+
+    checkpoint: ConfigPath
+    name: ModelName = "clip_vit_l14"
+    pretrained: bool = False
+    dropout: float = Field(default=0.1, ge=0.0, lt=1.0)
+    freeze_backbone: bool = True
+    lora_rank: NonNegativeInt = 16
+    lora_alpha: PositiveFloat = 16.0
+    image_size: ImageSize | None = None
+
+
+class DistillConfig(StrictConfig):
+    """Soft+hard knowledge distillation into the student classifier."""
+
+    soft_weight: float = Field(default=0.0, ge=0.0, le=5.0)
+    hard_weight: float = Field(default=1.0, ge=0.0, le=5.0)
+    temperature: PositiveFloat = 2.0
+    teacher: DistillTeacherConfig | None = None
+
+    @model_validator(mode="after")
+    def _teacher_required_when_soft(self) -> Self:
+        if self.soft_weight > 0.0 and self.teacher is None:
+            raise ValueError(
+                "losses.distill.soft_weight > 0 requires losses.distill.teacher"
+            )
+        return self
+
+
 class LossesConfig(StrictConfig):
     asmr_aux: AsmrAuxConfig = Field(default_factory=AsmrAuxConfig)
+    distill: DistillConfig = Field(default_factory=DistillConfig)
 
 
 class OptimizationConfig(StrictConfig):
@@ -314,6 +345,27 @@ def load_config(path: Path, *, project_root: Path | None = None) -> ExperimentCo
     model = config.model.model_copy(
         update={"weights_path": _resolve(config.model.weights_path, root)}
     )
+    distill = config.losses.distill
+    if distill.teacher is not None:
+        teacher = distill.teacher.model_copy(
+            update={"checkpoint": _resolve(distill.teacher.checkpoint, root)}
+        )
+        if teacher.checkpoint is None:
+            raise ValueError("losses.distill.teacher.checkpoint resolved to None")
+        native = MODEL_NATIVE_IMAGE_SIZE.get(teacher.name)
+        image_size = teacher.image_size if teacher.image_size is not None else native
+        if image_size is None:
+            raise ValueError(
+                f"losses.distill.teacher.name={teacher.name} needs image_size"
+            )
+        if native is not None and image_size != native:
+            raise ValueError(
+                f"losses.distill.teacher.name={teacher.name} needs "
+                f"image_size={native}, got {image_size}"
+            )
+        teacher = teacher.model_copy(update={"image_size": image_size})
+        distill = distill.model_copy(update={"teacher": teacher})
+    losses = config.losses.model_copy(update={"distill": distill})
     output_dir = _resolve(config.run.output_dir, root)
     if output_dir is None:
         raise ValueError("run.output_dir resolved to None")
@@ -326,4 +378,6 @@ def load_config(path: Path, *, project_root: Path | None = None) -> ExperimentCo
             "init_weights": _resolve(config.run.init_weights, root),
         }
     )
-    return config.model_copy(update={"model": model, "data": data, "run": run})
+    return config.model_copy(
+        update={"model": model, "data": data, "run": run, "losses": losses}
+    )

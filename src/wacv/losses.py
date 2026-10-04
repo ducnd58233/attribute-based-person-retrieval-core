@@ -136,3 +136,41 @@ class LogitAdjustedLoss(nn.Module):
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """BCE (or focal) on ``logits + offset``."""
         return self.base(logits + self.offset, targets)
+
+
+def soft_hard_kd_loss(
+    student_logits: torch.Tensor,
+    hard_targets: torch.Tensor,
+    teacher_logits: torch.Tensor,
+    *,
+    hard_criterion: nn.Module,
+    soft_weight: float,
+    hard_weight: float,
+    temperature: float,
+) -> torch.Tensor:
+    """Soft+hard multi-label KD: hard BCE plus temperature-scaled soft BCE.
+
+    Soft targets are ``sigmoid(teacher_logits / T)``. The soft term uses
+    ``BCEWithLogits(student_logits / T, soft_targets)`` scaled by ``T**2``
+    (Hinton et al.) so gradient magnitude stays comparable across ``T``.
+    Teacher logits are treated as constants (no gradient into the teacher).
+    """
+    if temperature <= 0.0:
+        raise ValueError(f"temperature must be > 0, got {temperature}")
+    if soft_weight < 0.0 or hard_weight < 0.0:
+        raise ValueError(
+            f"soft_weight and hard_weight must be >= 0, got "
+            f"{soft_weight}, {hard_weight}"
+        )
+    hard = hard_criterion(student_logits, hard_targets)
+    if soft_weight == 0.0:
+        return hard_weight * hard
+    teacher = teacher_logits.detach()
+    soft_targets = torch.sigmoid(teacher / temperature)
+    soft = F.binary_cross_entropy_with_logits(
+        student_logits / temperature,
+        soft_targets,
+        reduction="mean",
+    )
+    soft = soft * (temperature * temperature)
+    return hard_weight * hard + soft_weight * soft

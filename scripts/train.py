@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 
 if TYPE_CHECKING:
     from src.wacv.config import ExperimentConfig
-    from src.wacv.engine import AsmrTrainContext
+    from src.wacv.engine import AsmrTrainContext, DistillTrainContext, TrainerAuxContext
     from src.wacv.evaluation import RankingEvalData
     from src.wacv.models.clip import ClipAttributeClassifier
     from src.wacv.models.dinov2 import Dinov2AttributeClassifier
@@ -182,6 +182,55 @@ def maybe_wrap_logit_adjust(
     return LogitAdjustedLoss(criterion, offset)
 
 
+def build_distill_context(
+    config: ExperimentConfig,
+    *,
+    num_attributes: int,
+    device: torch.device,
+) -> DistillTrainContext | None:
+    """Load a frozen teacher for soft+hard KD, or None when distill is off."""
+    from src.wacv.checkpoint import load_model_weights
+    from src.wacv.config import MODEL_NATIVE_IMAGE_SIZE, ModelConfig
+    from src.wacv.engine import DistillTrainContext
+    from src.wacv.models import build_model
+
+    distill = config.losses.distill
+    if distill.soft_weight <= 0.0:
+        return None
+    teacher_cfg = distill.teacher
+    if teacher_cfg is None:
+        raise ValueError("losses.distill.soft_weight > 0 requires teacher")
+    checkpoint = teacher_cfg.checkpoint
+    if checkpoint is None:
+        raise ValueError("losses.distill.teacher.checkpoint is required")
+    image_size = teacher_cfg.image_size or MODEL_NATIVE_IMAGE_SIZE[teacher_cfg.name]
+    teacher_model_config = ModelConfig(
+        name=teacher_cfg.name,
+        pretrained=teacher_cfg.pretrained,
+        dropout=teacher_cfg.dropout,
+        freeze_backbone=teacher_cfg.freeze_backbone,
+        lora_rank=teacher_cfg.lora_rank,
+        lora_alpha=teacher_cfg.lora_alpha,
+    )
+    teacher = build_model(teacher_model_config, num_attributes=num_attributes)
+    load_model_weights(checkpoint.resolve(), teacher, map_location=device, strict=True)
+    teacher.to(device)
+    teacher.eval()
+    for parameter in teacher.parameters():
+        parameter.requires_grad_(False)
+    LOGGER.info(
+        "distill teacher=%s checkpoint=%s image_size=%s "
+        "soft_weight=%s hard_weight=%s T=%s",
+        teacher_cfg.name,
+        checkpoint,
+        image_size,
+        distill.soft_weight,
+        distill.hard_weight,
+        distill.temperature,
+    )
+    return DistillTrainContext(teacher=teacher, teacher_image_size=image_size)
+
+
 def _run_linear_probe_stage(
     *,
     model: ClipAttributeClassifier | Dinov2AttributeClassifier,
@@ -190,13 +239,16 @@ def _run_linear_probe_stage(
     tracker: RunTracker,
     config: ExperimentConfig,
     fit_data: tuple[
-        DataLoader, DataLoader, RankingEvalData | None, AsmrTrainContext | None
+        DataLoader,
+        DataLoader,
+        RankingEvalData | None,
+        TrainerAuxContext,
     ],
 ) -> torch.optim.Optimizer:
     """Stage-1 LP then build the stage-2 AdamW optimizer with layer-wise LR."""
     from src.wacv.engine import Trainer
 
-    train_loader, val_loader, ranking, asmr_context = fit_data
+    train_loader, val_loader, ranking, aux = fit_data
     model.freeze_backbone()
     lp_config = config.model_copy(
         update={
@@ -228,7 +280,7 @@ def _run_linear_probe_stage(
         device,
         tracker,
         lp_config,
-        asmr_context=asmr_context,
+        aux=aux,
     ).fit(train_loader, val_loader, ranking=ranking)
     model.unfreeze_backbone()
     ft_groups = model.layerwise_param_groups(
@@ -270,6 +322,12 @@ def main() -> None:
         config, device, query_id_by_image=query_id_by_image
     )
     ranking = build_ranking_eval(config, device)
+    distill_context = build_distill_context(
+        config, num_attributes=num_attributes, device=device
+    )
+    from src.wacv.engine import TrainerAuxContext
+
+    aux = TrainerAuxContext(asmr=asmr_context, distill=distill_context)
 
     model = build_model(config.model, num_attributes=num_attributes).to(device)
     if config.run.init_weights is not None:
@@ -288,12 +346,14 @@ def main() -> None:
 
     with RunTracker(config) as tracker:
         tracker.logger.info(
-            "device=%s model=%s num_attributes=%d ranking_each_epoch=%s lp_ft=%s",
+            "device=%s model=%s num_attributes=%d "
+            "ranking_each_epoch=%s lp_ft=%s distill=%s",
             device,
             config.model.name,
             num_attributes,
             ranking is not None,
             config.optimization.lp_ft,
+            config.losses.distill.soft_weight > 0.0,
         )
         if config.optimization.lp_ft and isinstance(
             model, ClipAttributeClassifier | Dinov2AttributeClassifier
@@ -304,7 +364,7 @@ def main() -> None:
                 device=device,
                 tracker=tracker,
                 config=config,
-                fit_data=(train_loader, val_loader, ranking, asmr_context),
+                fit_data=(train_loader, val_loader, ranking, aux),
             )
         else:
             optimizer = torch.optim.AdamW(
@@ -325,7 +385,7 @@ def main() -> None:
             device,
             tracker,
             config,
-            asmr_context=asmr_context,
+            aux=aux,
         ).fit(train_loader, val_loader, ranking=ranking)
         tracker.logger.info(
             "finished start_epoch=%d end_epoch=%d global_step=%d best_val_loss=%.6f",
