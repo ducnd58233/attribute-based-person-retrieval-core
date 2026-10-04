@@ -84,25 +84,32 @@ here.
   under a gitignored `data/` (already in `.gitignore`); the real training
   data and hidden test set are never committed here, per the competition's
   licence terms in the parent workspace's `PROBLEM-DETAILS.md`.
-- **Experiment worktrees: shared data root (MUST):** every `git worktree`
-  for an experiment (`…-core-e34`, `…-core-e60`, …) **must** reuse the
-  main checkout's organizer dataset — **no second `scripts/download-dataset.py`
-  run and no duplicated `data/` trees**. Default YAML `data.root: data` is
-  relative to that worktree, which is why naive downloads fill the disk.
+- **Experiment worktrees: share `data/` and `.venv` (MUST):** every
+  `git worktree` for an experiment (`…-core-e34`, `…-core-e40`, …) **must
+  not copy** `data/` or `.venv`. Link both to the main checkout
+  `attribute-based-person-retrieval-core/` — **no second
+  `scripts/download-dataset.py` run, no duplicated dataset trees, no
+  second venv install**. Default YAML `data.root: data` is relative to
+  that worktree, which is why naive downloads fill the disk. Parent-workspace
+  `_KEEP_data_duplicates_DO_NOT_DELETE/` is temporary recovery after a
+  Windows junction wipe, not the desired policy; do not create new
+  duplicates.
 
-  Prefer a junction/symlink in the new worktree (do this immediately after
-  `git worktree add`, before any train/download):
+  Immediately after `git worktree add`, before any train/download (Windows:
+  prefer junction/`mklink /J`; Git Bash/WSL: symlink):
 
   ```sh
   # from the new worktree root; MAIN is the primary core checkout
   MAIN="../attribute-based-person-retrieval-core"
   # Git Bash / WSL:
   ln -sfn "$(cd "$MAIN" && pwd)/data" data
+  ln -sfn "$(cd "$MAIN" && pwd)/.venv" .venv
   # Windows CMD (admin not required for /J):
   # mklink /J data ..\attribute-based-person-retrieval-core\data
+  # mklink /J .venv ..\attribute-based-person-retrieval-core\.venv
   ```
 
-  Or set an absolute override (also honored by `load_config` and
+  Or set an absolute data override (also honored by `load_config` and
   `scripts/download-dataset.py`; may live in `.env` — see `.env.example`):
 
   ```sh
@@ -113,10 +120,19 @@ here.
   `resolve_data_root` / `download-dataset.py` automatically fall back to
   sibling `../attribute-based-person-retrieval-core/data` when that tree
   already looks complete — so a fresh worktree must not re-download.
-  Still create the junction/symlink so tools that assume `./data` keep
-  working. `download-dataset.py` skips only when annotations **and** all
-  three corpora (Market1501, PA100k, PETA) exist under the resolved root.
-  Never delete the main worktree's `data/`.
+  Still create the `data` and `.venv` junctions/symlinks so tools that
+  assume `./data` / `./.venv` keep working. `download-dataset.py` skips
+  only when annotations **and** all three corpora (Market1501, PA100k,
+  PETA) exist under the resolved root. Never delete or re-download the
+  main worktree's `data/`.
+
+  **Before `git worktree remove` (MUST):** in that worktree only, remove
+  the `data` and `.venv` reparse points first (`rmdir data .venv` on
+  Windows CMD for junctions, or `unlink`/`rm` the symlinks — never
+  `rm -rf` through them). Then run `git worktree remove`. Leaving the
+  junctions in place lets worktree cleanup follow them and wipe the main
+  checkout's real `data/` / `.venv` (the incident that forced the
+  quarantine recovery).
 - **Never commit trained model weights** to git history directly; use
   Git LFS, Hugging Face Hub, or another artifact store, and document
   wherever weights are pulled from in the model's own README.
