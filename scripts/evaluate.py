@@ -82,21 +82,15 @@ def _evaluate_protocol(
     distance: str,
     calibration_out: Path | None = None,
 ) -> dict[str, float]:
-    from src.wacv.data import AttributeDataset, build_loader, transforms_for_model
+    from src.wacv.data import build_eval_loader
     from src.wacv.evaluation import RankingEvalData, compute_ranking_metrics
 
-    dataset = AttributeDataset(
-        ground_truth,
-        config.data.root,
-        transforms_for_model(
-            config.model.name, train=False, image_size=config.data.image_size
-        ),
-        attribute_names=attribute_names,
-    )
     data = RankingEvalData(
         queries=queries,
         gallery_attrs=ground_truth[list(attribute_names)].to_numpy(dtype=np.int64),
-        gallery_loader=build_loader(dataset, config.data, device, shuffle=False),
+        gallery_loader=build_eval_loader(
+            ground_truth, attribute_names, config.model.name, config.data, device
+        ),
     )
     started = time.perf_counter()
     metrics = compute_ranking_metrics(

@@ -122,13 +122,7 @@ def build_ranking_eval(
     import numpy as np
 
     from src.wacv.attributes import attribute_names_from_columns
-    from src.wacv.data import (
-        AttributeDataset,
-        build_loader,
-        load_gt,
-        load_queries,
-        transforms_for_model,
-    )
+    from src.wacv.data import build_eval_loader, load_gt, load_queries
     from src.wacv.evaluation import RankingEvalData
 
     val_root = config.data.root / "annotations" / "task2" / "val"
@@ -150,15 +144,9 @@ def build_ranking_eval(
         ground_truth = ground_truth.iloc[: config.data.limit]
         queries = queries[: config.data.limit]
 
-    dataset = AttributeDataset(
-        ground_truth,
-        config.data.root,
-        transforms_for_model(
-            config.model.name, train=False, image_size=config.data.image_size
-        ),
-        attribute_names=attribute_names,
+    loader = build_eval_loader(
+        ground_truth, attribute_names, config.model.name, config.data, device
     )
-    loader = build_loader(dataset, config.data, device, shuffle=False)
     gallery_attrs = ground_truth[list(attribute_names)].to_numpy(dtype=np.int64)
     return RankingEvalData(
         queries=queries,
