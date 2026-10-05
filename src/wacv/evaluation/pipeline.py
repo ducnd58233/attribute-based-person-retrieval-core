@@ -19,10 +19,12 @@ from src.wacv.evaluation.calibration import (
 from src.wacv.evaluation.distances import ranking_distance
 from src.wacv.evaluation.predict import (
     predict_gallery_embeddings,
+    predict_pooled_embeddings,
     predict_probabilities,
     unwrap_eval_module,
 )
 from src.wacv.evaluation.rerank import dual_softmax_rerank
+from src.wacv.evaluation.smoothing import neighbour_smooth_probabilities
 from src.wacv.monitoring.metrics import evaluate_ranking, mean_accuracy
 from src.wacv.query_adapter import AttributeModelWithHardQuery
 
@@ -45,6 +47,33 @@ def _write_calibration(path: Path, temperatures: np.ndarray) -> None:
     path.write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
+
+
+def rank_distances(
+    queries: np.ndarray,
+    probabilities: np.ndarray,
+    ranking_config: RankingConfig,
+    *,
+    temperature: float,
+    gallery_embeddings: np.ndarray | None = None,
+    query_embeddings: np.ndarray | None = None,
+) -> np.ndarray:
+    """Configured ranking distance, then the optional dual-softmax query norm."""
+    distances = ranking_distance(
+        queries,
+        probabilities,
+        distance=ranking_config.distance,
+        temperature=temperature,
+        alpha=ranking_config.alpha,
+        gallery_embeddings=gallery_embeddings,
+        query_embeddings=query_embeddings,
+        clear_fusion=ranking_config.clear_fusion,
+    )
+    if ranking_config.query_norm == "dual_softmax":
+        distances = dual_softmax_rerank(
+            distances, tau=float(ranking_config.query_norm_tau)
+        )
+    return distances
 
 
 def compute_ranking_metrics(
@@ -76,10 +105,20 @@ def compute_ranking_metrics(
         tta_scale=float(inference.tta_scale),
     )
     score_probabilities = probabilities
+    if ranking_config.neighbour_smooth is not None:
+        score_probabilities = neighbour_smooth_probabilities(
+            probabilities,
+            predict_pooled_embeddings(
+                model, data.gallery_loader, device, progress=progress
+            ),
+            ranking_config.neighbour_smooth,
+        )
     temperature = float(ranking_config.temperature)
     if calibrate:
-        temperatures = fit_per_attribute_temperatures(probabilities, data.gallery_attrs)
-        score_probabilities = calibrate_probabilities(probabilities, temperatures)
+        temperatures = fit_per_attribute_temperatures(
+            score_probabilities, data.gallery_attrs
+        )
+        score_probabilities = calibrate_probabilities(score_probabilities, temperatures)
         temperature = 1.0
         if calibration_out is not None:
             _write_calibration(calibration_out, temperatures)
@@ -97,20 +136,14 @@ def compute_ranking_metrics(
         with torch.inference_mode():
             query_embeddings = root.query_embeddings(query_tensor).cpu().numpy()
 
-    distances = ranking_distance(
+    distances = rank_distances(
         data.queries,
         score_probabilities,
-        distance=ranking_config.distance,
+        ranking_config,
         temperature=temperature,
-        alpha=ranking_config.alpha,
         gallery_embeddings=gallery_embeddings,
         query_embeddings=query_embeddings,
-        clear_fusion=ranking_config.clear_fusion,
     )
-    if ranking_config.query_norm == "dual_softmax":
-        distances = dual_softmax_rerank(
-            distances, tau=float(ranking_config.query_norm_tau)
-        )
     metrics = evaluate_ranking(data.queries, data.gallery_attrs, distances)
     metrics["mA"] = mean_accuracy(probabilities, data.gallery_attrs)
     return metrics
