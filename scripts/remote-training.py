@@ -1,4 +1,4 @@
-"""Push a training run to a remote GPU backend (Kaggle, Colab, ...).
+"""Push a training run to a remote GPU backend (Colab, Kaggle, Lightning).
 
 Usage:
   uv run python scripts/remote-training.py kaggle \
@@ -34,9 +34,9 @@ if str(ROOT) not in sys.path:
 
 
 def parse_args() -> argparse.Namespace:
-    from src.wacv.remote import colab, kaggle
+    from src.wacv.remote import colab, kaggle, lightning
 
-    backends = {"kaggle": kaggle, "colab": colab}
+    backends = {"kaggle": kaggle, "colab": colab, "lightning": lightning}
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )

@@ -408,19 +408,27 @@ here.
   each stages a self-contained folder (this repo's `scripts/` + `src/wacv/`
   + one experiment YAML, never `data/`) and ships that instead.
 
-- **Training order is Colab, then Kaggle, then local — and a code bug
-  never falls through to the next one (MUST):** start every real training
-  run with `remote-training.py colab`. Move to the next option only on an
-  **infrastructure failure** — the `colab`/`kaggle` CLI wrapper itself
-  exiting non-zero before or during the run: auth (`gcloud`/ADC), quota,
-  session/kernel provisioning, network, or a timeout with no result yet.
-  On that class of failure, retry with `remote-training.py kaggle`; if
-  Kaggle also fails the same way, only then fall back to training on this
-  machine (`uv run python scripts/train.py --config configs/<name>.yml`).
-  Never start on the local machine by default — both hosted options are
-  free GPU time this machine does not have to spend, and skipping
-  straight to local silently defeats the reason `remote-training.py`
-  exists.
+- **Training order is Colab, then Kaggle, then Lightning, then local — and
+  a code bug never falls through to the next one (MUST):** start every real
+  training run with `remote-training.py colab`. Move to the next option only
+  on an **infrastructure failure** — the backend wrapper itself exiting
+  non-zero before or during the run: auth (`gcloud`/ADC, API key), quota or
+  credits, session/kernel/Studio provisioning, network, or a timeout with no
+  result yet. On that class of failure, retry with `remote-training.py
+  kaggle`, then `remote-training.py lightning`; only when all three fail the
+  same way fall back to training on this machine (`uv run python
+  scripts/train.py --config configs/<name>.yml`). Never start on the local
+  machine by default — the hosted options are free GPU time this machine
+  does not have to spend, and skipping straight to local silently defeats
+  the reason `remote-training.py` exists.
+
+- **Each backend is a lane; fill every free lane (MUST):** Colab, Kaggle,
+  Lightning and the local GPU each run at most one training card at a time,
+  and different cards may run on different lanes at once. When a lane is
+  busy, the next queued card starts on the next free lane in the order above
+  instead of waiting. A card's own fallback (previous bullet) moves it to the
+  next free lane, never onto a lane another card holds. Record the lane in
+  the card's `STATUS.md` so another session does not double-book it.
 
   A **code-logic failure** — a traceback or exception from inside the
   staged training code itself, visible in the downloaded run's logs, a
@@ -442,6 +450,10 @@ here.
 
   uv tool install google-colab-cli               # once per machine, not a project dep
   uv run python scripts/remote-training.py colab --config configs/<name>.yml --gpu T4
+
+  # Lightning AI: free plan, no credit card. Fill LIGHTNING_* in .env; the SDK
+  # runs in an isolated `uv run --with lightning-sdk` interpreter, not the .venv.
+  uv run python scripts/remote-training.py lightning --config configs/<name>.yml --machine T4
   ```
 
   `remote-training.py` loads `.env` (gitignored; copy from `.env.example`,
