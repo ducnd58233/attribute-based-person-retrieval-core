@@ -57,6 +57,24 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="override ranking.distance from the config",
     )
+    parser.add_argument(
+        "--ensemble-checkpoint",
+        type=Path,
+        default=None,
+        help="second checkpoint whose probabilities are averaged with the primary",
+    )
+    parser.add_argument(
+        "--ensemble-config",
+        type=Path,
+        default=None,
+        help="config for --ensemble-checkpoint (same model input as the primary)",
+    )
+    parser.add_argument(
+        "--ensemble-weight",
+        type=float,
+        default=0.5,
+        help="weight on the primary model probabilities; the rest goes to the second",
+    )
     return parser.parse_args()
 
 
@@ -140,20 +158,35 @@ def evaluate_checkpoint(
     *,
     protocols: tuple[EvalProtocol, ...],
     distance: str | None = None,
+    ensemble_config_path: Path | None = None,
+    ensemble_checkpoint: Path | None = None,
+    ensemble_weight: float = 0.5,
 ) -> tuple[dict[str, dict[str, float]], ExperimentConfig]:
-    from src.wacv.checkpoint import load_model_weights
     from src.wacv.config import load_config
     from src.wacv.engine import resolve_device
-    from src.wacv.models import build_model
+    from src.wacv.models.ensemble import ProbabilityAverage
 
     config = load_config(config_path)
     device = resolve_device(config.run.device)
     distance_name = distance or config.ranking.distance
 
     _, _, attribute_names = _prepare_protocol_data(config, protocols[0])
-    inference_model = config.model.model_copy(update={"pretrained": False})
-    model = build_model(inference_model, num_attributes=len(attribute_names)).to(device)
-    load_model_weights(checkpoint.resolve(), model, map_location=device)
+    model = _load_eval_model(config, checkpoint, len(attribute_names), device)
+    if ensemble_checkpoint is not None:
+        if ensemble_config_path is None:
+            raise ValueError("--ensemble-checkpoint requires --ensemble-config")
+        other_config = load_config(ensemble_config_path)
+        if (other_config.model.name, other_config.data.image_size) != (
+            config.model.name,
+            config.data.image_size,
+        ):
+            raise ValueError("ensemble members must share model name and image size")
+        other = _load_eval_model(
+            other_config, ensemble_checkpoint, len(attribute_names), device
+        )
+        model = ProbabilityAverage(
+            [model, other], [ensemble_weight, 1.0 - ensemble_weight]
+        ).to(device)
 
     results: dict[str, dict[str, float]] = {}
     run_dir = config.run.output_dir / config.run.name
@@ -175,6 +208,23 @@ def evaluate_checkpoint(
             calibration_out=calibration_path,
         )
     return results, config
+
+
+def _load_eval_model(
+    config: ExperimentConfig,
+    checkpoint: Path,
+    num_attributes: int,
+    device: torch.device,
+) -> torch.nn.Module:
+    from src.wacv.checkpoint import load_model_weights
+    from src.wacv.models import build_model
+
+    inference_model = config.model.model_copy(update={"pretrained": False})
+    model = build_model(inference_model, num_attributes=num_attributes)
+    # Trainer checkpoints carry optimizer and EMA tensors; deserialize them on
+    # CPU so two L-scale members do not exhaust GPU memory before load.
+    load_model_weights(checkpoint.resolve(), model, map_location=torch.device("cpu"))
+    return model.to(device)
 
 
 def _merge_metrics_file(
@@ -210,6 +260,9 @@ def main() -> None:
         checkpoint,
         protocols=protocols,
         distance=args.distance,
+        ensemble_config_path=args.ensemble_config,
+        ensemble_checkpoint=args.ensemble_checkpoint,
+        ensemble_weight=args.ensemble_weight,
     )
     serialized = json.dumps(results, indent=2, sort_keys=True) + "\n"
     run_dir = config.run.output_dir / config.run.name
