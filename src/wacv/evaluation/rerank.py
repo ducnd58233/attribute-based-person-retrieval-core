@@ -21,11 +21,11 @@ def dual_softmax_rerank(
     Gallery columns are processed in chunks so peak RAM stays bounded on
     Codabench-sized Q×G matrices (float64 full-matrix form peaked ~6GB).
 
-    Mutates and returns its own float32-cast copy of ``distances`` in place
-    rather than allocating a second full Q x G output array - mirrors
-    submission/run.py's copy of this function exactly (see its docstring).
-    Both call sites here reassign their ``distances`` variable to this
-    function's return value and never read the pre-call array again.
+    Works in place to avoid a second full Q x G array: a float32 input is
+    overwritten and returned (any other dtype is cast to a float32 copy
+    first). Mirrors submission/run.py's copy of this function. Both call sites
+    reassign their ``distances`` to the return value and never read the old
+    array again; a caller that needs the input kept should pass a copy.
     """
     similarities = np.asarray(distances, dtype=np.float32)
     np.negative(similarities, out=similarities)

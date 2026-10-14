@@ -637,8 +637,9 @@ def _dual_softmax_rerank(
     a large QxG matrix does not allocate multi-GB float64 temporaries and get
     the Codabench worker OOM-killed ("Child task failed or non-zero return").
 
-    Mutates and returns its own float32-cast copy of ``distances`` in place
-    rather than allocating a second full Q x G output array: on the real E17
+    Works in place: a float32 ``distances`` is overwritten and returned (any
+    other dtype is cast to a float32 copy first), rather than allocating a
+    second full Q x G output array: on the real E17
     gallery shape (~3462x33407) that second array was itself a ~463MB
     allocation the caller never needed once the chunked loop below can write
     every result straight back over the value it read. Safe because
