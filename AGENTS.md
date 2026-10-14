@@ -29,14 +29,15 @@ duplicated here; link to them instead.
 Two environments exist here, deliberately different:
 
 - **Dev/training** (`environment.yml` + `pyproject.toml`, this repo's root):
-  Python 3.13, CUDA 13.0, torch built against cu130 — whatever is fastest
-  for training on your own hardware. Nothing here has to match the
-  competition's runtime.
+  whatever Python, CUDA and torch versions are fastest for training on your
+  own hardware; the pinned versions are in those two files. Nothing here has
+  to match the competition's runtime.
 - **Submission/evaluation** (`deployments/docker/`): a local mirror of the
-  organizers' exact evaluation container
-  (`pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime`, Python 3.11, torch
-  2.4.1). Only code and weights inside the submission zip run here — no
-  network access, everything the model needs must be vendored into the zip.
+  organizers' exact evaluation container; the image is pinned in
+  `deployments/docker/Dockerfile` and must match the parent workspace's
+  `PROBLEM-DETAILS.md`. Only code and weights inside the submission zip run
+  here — no network access, everything the model needs must be vendored
+  into the zip.
 
 Do not let the two blend: a dependency added to `pyproject.toml` for
 training does not exist in the evaluation container unless it is also
@@ -85,7 +86,7 @@ here.
   data and hidden test set are never committed here, per the competition's
   licence terms in the parent workspace's `PROBLEM-DETAILS.md`.
 - **Experiment worktrees: share `data/` and `.venv` (MUST):** every
-  `git worktree` for an experiment (`…-core-e34`, `…-core-e40`, …) **must
+  `git worktree` for an experiment (`attribute-based-person-retrieval-core-<id>`) **must
   not copy** `data/` or `.venv`. Link both to the main checkout
   `attribute-based-person-retrieval-core/` — **no second
   `scripts/download-dataset.py` run, no duplicated dataset trees, no
@@ -213,8 +214,8 @@ here.
   test; only reading `git diff` caught it. Match the exact token, never a
   substring, and read the result.
 - **Fix type errors in code, with these patterns (MUST):** no suppression
-  comment is ever the answer (see above). What worked for the 59 pyright
-  errors: `module.get_submodule("a.b")`, `get_parameter` and
+  comment is ever the answer (see above). What worked in past type-error
+  cleanups: `module.get_submodule("a.b")`, `get_parameter` and
   `register_parameter` for dynamic `nn.Module` attributes (they carry a real
   runtime check); `isinstance` narrowing at the call site instead of a `bool`
   helper; a runtime-checkable `Protocol` instead of
@@ -281,16 +282,12 @@ here.
   (no `src.wacv` import - it ships standalone into the sandboxed Codabench
   eval image, see the file's own docstring), so every prediction/ranking
   function it reimplements has to copy the library's numeric behavior
-  exactly, not re-derive it. Codabench submission 948099 failed exactly
-  this way: `submission/run.py`'s `_dual_softmax_rerank` allocated the
-  full Q×G distance matrix as **float64** (~6.5GB peak on a real
-  ~3462×33407 gallery) after `src/wacv/evaluation/__init__.py`'s own
-  `dual_softmax_rerank` had already moved to a chunked **float32**
-  version - the submission template simply lagged. Codabench's ingestion
-  worker OOM-killed the child process with an opaque platform message
-  ("non-zero return code"), not a Python traceback, so nothing pointed at
-  the actual line; `pytest` and Docker's `load_model`/small-gallery smoke
-  both passed, since neither exercises a gallery large enough to OOM.
+  exactly, not re-derive it. A submission has already failed this way: the
+  `run.py` copy of a ranking function kept a full-size float64 matrix after
+  the library copy had moved to chunked float32, and Codabench OOM-killed it
+  with an opaque platform message, not a Python traceback, while `pytest`
+  and the small-gallery Docker smoke both passed (details:
+  parent workspace `records/ROUTER.md`, "Submission incidents").
   After touching any submission-side reimplementation of library math,
   run (or add, if the function is new) a parity test like
   `tests/test_dual_softmax.py`'s
@@ -304,14 +301,10 @@ here.
   footprint rather than a formula.
 - **A memory fix for a ranking function is not done until the whole
   ranking stage is profiled at real gallery scale, not just the one
-  function that was touched (MUST):** Codabench submission 948099 was
-  "fixed" by making `_dual_softmax_rerank` chunked float32 (see the
-  dtype-mirroring rule above); the very next submission (948604), same
-  zip pattern, failed with the identical opaque error. Profiling the
-  *whole* ranking stage at the real E17 shape (Q=3462, G=33407) - not
-  just the function that was already suspected - found the actual
-  remaining peak was in `_hybrid_distance`/`_minmax_per_query`, never
-  touched by the first fix. After any change meant to fix or bound a
+  function that was touched (MUST):** fixing only the suspected function
+  once left the real peak elsewhere in the ranking stage, and the next
+  upload failed with the same opaque error (parent workspace
+  `records/ROUTER.md`, "Submission incidents"). After any change meant to fix or bound a
   submission-side OOM, profile peak RSS across the full call it sits
   inside (`rank_gallery`, not just the one function), at the real
   gallery/query counts recorded in this submission's own
@@ -321,15 +314,15 @@ here.
   naive expression form for any O(Q×G) array on the submission's ranking
   path (MUST):** `a + b - 2*c`, `np.where(cond, x, np.zeros_like(y))`, and
   `weight * a + (1 - weight) * b` each read as a single line but allocate
-  one full-size temporary per operator - on a ~3462×33407 gallery that is
-  ~463MB per float32 temporary, and several stack up across one
-  expression. `_hybrid_distance`, `_minmax_per_query`, `_nll_distance`,
+  one full-size temporary per operator, and on a real gallery several
+  hundred-MB temporaries stack up across one expression. `_hybrid_distance`, `_minmax_per_query`, `_nll_distance`,
   and `_l1_distance` (and their identical library copies in
   `src/wacv/evaluation/__init__.py`) held up to four such arrays alive at
   once before this was rewritten to mutate a single scratch buffer
-  through each step - cut measured peak RSS on the real shape by 47%
-  (2808MB -> 1492MB) with zero output change (verified against this
-  repo's own naive-loop parity tests, not assumed). Apply this only where
+  through each step - which cut measured peak memory on the real shape
+  substantially with zero output change (verified against this repo's own
+  naive-loop parity tests, not assumed; numbers in the parent workspace's
+  `records/ROUTER.md`, "Submission incidents"). Apply this only where
   the array being mutated is a scratch value nothing else reads
   afterward - state that ownership assumption in the function's
   docstring, the way `_dual_softmax_rerank`'s and `_minmax_per_query`'s
