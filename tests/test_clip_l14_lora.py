@@ -58,6 +58,10 @@ def test_lora_on_mha_in_proj_starts_as_base_and_trains_only_adapters() -> None:
     after, _ = attn(tokens, tokens, tokens, need_weights=False)
     assert is_parametrized(attn, "in_proj_weight")
     assert torch.allclose(before, after, atol=1e-6)
+    attn.eval()  # eval may take MultiheadAttention's fused fast path
+    with torch.inference_mode():
+        evaluated, _ = attn(tokens, tokens, tokens, need_weights=False)
+    assert torch.allclose(before, evaluated, atol=1e-5)
     trainable = {n for n, p in attn.named_parameters() if p.requires_grad}
     assert "parametrizations.in_proj_weight.0.lora_A" in trainable
     assert "parametrizations.in_proj_weight.original" not in trainable

@@ -102,10 +102,8 @@ def build_loaders(
     val_dataset = AttributeDataset(
         val_gt, config.data.root, eval_transform, attribute_names=attribute_names
     )
-    train_loader = build_loader(train_dataset, config.data, device, shuffle=True)
-    val_loader = build_loader(
-        val_dataset, config.data, device, shuffle=False, train=False
-    )
+    train_loader = build_loader(train_dataset, config.data, device, training=True)
+    val_loader = build_loader(val_dataset, config.data, device, training=False)
 
     positive_rates = train_gt[list(attribute_names)].astype(float).mean()
     positive_rates = positive_rates.clip(lower=1e-6)

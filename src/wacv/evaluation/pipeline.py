@@ -39,10 +39,14 @@ class RankingEvalData:
     gallery_images: tuple[str, ...] | None = None
 
 
-def can_score_from_probabilities(
+def ranking_needs_only_probabilities(
     ranking_config: RankingConfig, inference_config: InferenceConfig
 ) -> bool:
-    """True when ranking needs nothing but identity-view probabilities."""
+    """True when ranking needs only identity-view probabilities.
+
+    False for TTA, neighbour smoothing and clear_hard, which need extra
+    forwards or embeddings beyond one plain probability pass.
+    """
     return (
         list(inference_config.tta) == ["identity"]
         and ranking_config.neighbour_smooth is None

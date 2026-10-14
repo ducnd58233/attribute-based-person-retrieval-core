@@ -29,10 +29,10 @@ from src.wacv.evaluation.distances import (
 )
 from src.wacv.evaluation.pipeline import (
     RankingEvalData,
-    can_score_from_probabilities,
     compute_ranking_metrics,
     rank_distances,
     ranking_metrics_from_probabilities,
+    ranking_needs_only_probabilities,
 )
 from src.wacv.evaluation.predict import (
     FeatureEncoder,
@@ -50,7 +50,7 @@ __all__ = [
     "apply_tta_view",
     "calibrate_probabilities",
     "clear_hard_distance",
-    "can_score_from_probabilities",
+    "ranking_needs_only_probabilities",
     "compute_ranking_metrics",
     "ranking_metrics_from_probabilities",
     "dual_softmax_rerank",

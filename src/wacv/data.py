@@ -367,7 +367,7 @@ def build_eval_loader(
         ),
         attribute_names=attribute_names,
     )
-    return build_loader(dataset, data_config, device, shuffle=False, train=False)
+    return build_loader(dataset, data_config, device, training=False)
 
 
 def resolve_num_workers(requested: int) -> int:
@@ -378,41 +378,27 @@ def resolve_num_workers(requested: int) -> int:
     return min(requested, max(cpu_count - 1, 0))
 
 
-def seed_worker(worker_id: int) -> None:
-    """Seed numpy and ``random`` per worker from torch's per-worker seed.
-
-    Torch seeds itself per worker; numpy does not, so numpy-based augmentation
-    would otherwise start from an unseeded state in every spawned worker.
-    """
-    del worker_id
-    seed = torch.initial_seed() % 2**32
-    np.random.seed(seed)
-    random.seed(seed)
-
-
 def build_loader(
     dataset: Dataset,
     data_config: DataConfig,
     device: torch.device,
     *,
-    shuffle: bool,
-    train: bool = True,
+    training: bool,
 ) -> DataLoader:
-    """DataLoader with the batch size and worker policy of ``data_config``.
+    """DataLoader for training (shuffled) or evaluation (in order).
 
-    ``train=False`` uses ``eval_batch_size`` (falls back to ``batch_size``).
+    Training uses ``batch_size`` and keeps its workers alive across epochs.
+    Evaluation uses the larger ``eval_batch_size`` and lets its workers exit
+    after each pass, so a val loader does not hold a second set of worker
+    processes in memory for the whole run. Torch seeds ``random``, numpy and
+    torch in every worker itself.
     """
     workers = resolve_num_workers(data_config.num_workers)
-    batch_size = data_config.batch_size
-    if not train and data_config.eval_batch_size is not None:
-        batch_size = data_config.eval_batch_size
     return DataLoader(
         dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
+        batch_size=data_config.batch_size if training else data_config.eval_batch_size,
+        shuffle=training,
         num_workers=workers,
         pin_memory=device.type == "cuda",
-        persistent_workers=workers > 0,
-        prefetch_factor=4 if workers > 0 else None,
-        worker_init_fn=seed_worker if workers > 0 else None,
+        persistent_workers=training and workers > 0,
     )

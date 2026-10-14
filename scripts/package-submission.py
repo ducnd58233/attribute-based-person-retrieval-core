@@ -232,8 +232,12 @@ def _export_weights(
     }
 
 
-def _halve_torchscript(path: Path, card: dict[str, Any]) -> None:
-    """Rewrite a TorchScript package with fp16 parameters and buffers."""
+def _store_weights_as_fp16(path: Path, card: dict[str, Any]) -> None:
+    """Rewrite a TorchScript package with fp16 parameters and buffers.
+
+    CLIP's released weights are fp16 already, so the frozen tower loses
+    nothing; only trained adapters and heads are rounded.
+    """
     if card["weight_format"] != "torchscript":
         raise ValueError(
             "--weights-dtype fp16 needs a TorchScript (CLIP/DINOv2) package"
@@ -301,7 +305,7 @@ def main() -> None:
         card["inference_tta"] = views
     card["weight_dtype"] = str(args.weights_dtype)
     if args.weights_dtype == "fp16":
-        _halve_torchscript(assets / "model.pt", card)
+        _store_weights_as_fp16(assets / "model.pt", card)
     card["inference_decode_workers"] = int(args.decode_workers)
     card["inference_amp"] = str(args.amp)
     if card["neighbour_smooth"] is not None and "identity" not in card["inference_tta"]:

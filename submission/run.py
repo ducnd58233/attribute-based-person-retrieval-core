@@ -260,7 +260,9 @@ def load_model() -> None:
     _STATE["transform"] = _image_transform_from_card(card)
 
 
-def _decode(item: dict[str, Any], transform: transforms.Compose) -> torch.Tensor:
+def _load_image_tensor(
+    item: dict[str, Any], transform: transforms.Compose
+) -> torch.Tensor:
     image = Image.open(item["image_path"]).convert("RGB")
     tensor = transform(image)
     if not isinstance(tensor, torch.Tensor):
@@ -268,33 +270,37 @@ def _decode(item: dict[str, Any], transform: transforms.Compose) -> torch.Tensor
     return tensor
 
 
-def _iter_gallery_tensors(gallery: list[dict[str, Any]], device: torch.device) -> Any:
-    """Yield batches; with decode workers the next batch decodes during this one."""
+def _iter_gallery_tensors(
+    gallery: list[dict[str, Any]], device: torch.device, *, decode_workers: int = 0
+) -> Any:
+    """Yield image batches in gallery order.
+
+    With ``decode_workers`` > 0, a thread pool decodes the next batch while the
+    caller runs the model on the current one; at most two batches are in flight.
+    """
     total = len(gallery)
     transform = _STATE.get("transform", IMAGE_TRANSFORM)
     if not isinstance(transform, transforms.Compose):
         transform = IMAGE_TRANSFORM
-    card = _STATE["card"] if isinstance(_STATE.get("card"), dict) else {}
-    workers = int(card.get("inference_decode_workers", 0))
-    starts = list(range(0, total, BATCH_SIZE))
-    pool = ThreadPoolExecutor(max_workers=workers) if workers > 0 else None
+    batch_starts = range(0, total, BATCH_SIZE)
+    pool = ThreadPoolExecutor(max_workers=decode_workers) if decode_workers else None
 
-    def submit(start: int) -> list[Future[torch.Tensor]]:
+    def submit_batch(start: int) -> list[Future[torch.Tensor]]:
         assert pool is not None
-        chunk = gallery[start : start + BATCH_SIZE]
-        return [pool.submit(_decode, item, transform) for item in chunk]
+        batch = gallery[start : start + BATCH_SIZE]
+        return [pool.submit(_load_image_tensor, item, transform) for item in batch]
 
     try:
-        pending = submit(starts[0]) if pool is not None and starts else []
-        for position, start in enumerate(starts):
+        next_batch = submit_batch(0) if pool is not None and total else []
+        for start in batch_starts:
             if pool is None:
-                chunk = gallery[start : start + BATCH_SIZE]
-                tensors = [_decode(item, transform) for item in chunk]
+                batch = gallery[start : start + BATCH_SIZE]
+                tensors = [_load_image_tensor(item, transform) for item in batch]
             else:
-                current = pending
-                if position + 1 < len(starts):
-                    pending = submit(starts[position + 1])
-                tensors = [future.result() for future in current]
+                current_batch = next_batch
+                if start + BATCH_SIZE < total:
+                    next_batch = submit_batch(start + BATCH_SIZE)
+                tensors = [future.result() for future in current_batch]
             images = torch.stack(tensors, dim=0).to(device, non_blocking=True)
             done = min(start + BATCH_SIZE, total)
             print(f"[rank_gallery] {done}/{total} gallery images processed", flush=True)
@@ -358,7 +364,9 @@ def _predict_gallery(
     batches: list[np.ndarray] = []
     feature_batches: list[np.ndarray] = []
     with torch.inference_mode(), _autocast(device, card):
-        for images in _iter_gallery_tensors(gallery, device):
+        for images in _iter_gallery_tensors(
+            gallery, device, decode_workers=int(card.get("inference_decode_workers", 0))
+        ):
             probs_sum: torch.Tensor | None = None
             for view in tta_views:
                 output = model(_apply_tta_view(images, view, scale=tta_scale))

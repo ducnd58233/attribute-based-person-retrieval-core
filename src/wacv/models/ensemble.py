@@ -19,20 +19,19 @@ class ProbabilityAverage(nn.Module):
         super().__init__()
         if len(members) != len(weights) or len(members) < 2:
             raise ValueError("need at least two members and one weight per member")
-        if any(w < 0.0 for w in weights) or abs(sum(weights) - 1.0) > 1e-6:
+        if any(weight < 0.0 for weight in weights) or abs(sum(weights) - 1.0) > 1e-6:
             raise ValueError(f"weights must be >= 0 and sum to 1, got {weights}")
         self.members = nn.ModuleList(members)
-        self.weights = tuple(float(w) for w in weights)
         # A buffer, not a tensor built in forward: torch.jit.trace would freeze
         # that tensor to the tracing device and break the package on CUDA.
         self.register_buffer(
             "member_weights",
-            torch.tensor(self.weights, dtype=torch.float32).view(-1, 1, 1),
+            torch.tensor(weights, dtype=torch.float32).view(-1, 1, 1),
         )
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
-        probs = torch.stack(
+        probabilities = torch.stack(
             [torch.sigmoid(member(images).float()) for member in self.members]
         )
         weights = self.get_buffer("member_weights").float()
-        return torch.logit((weights * probs).sum(dim=0), eps=1e-6)
+        return torch.logit((weights * probabilities).sum(dim=0), eps=1e-6)

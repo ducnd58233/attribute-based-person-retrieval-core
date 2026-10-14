@@ -151,11 +151,11 @@ class DataConfig(StrictConfig):
     root: ConfigPath = Path("data")
     batch_size: PositiveInt = 32
     num_workers: NonNegativeInt = 4
-    eval_batch_size: PositiveInt | None = Field(
+    eval_batch_size: PositiveInt = Field(
         default=64,
         description=(
-            "Batch size for val/eval loaders (None reuses batch_size). Eval "
-            "runs in eval mode with no batch statistics, so this changes speed only."
+            "Batch size for val/eval loaders. Eval runs in eval mode with no "
+            "batch statistics, so this changes speed and memory, not results."
         ),
     )
     limit: PositiveInt | None = None

@@ -21,9 +21,9 @@ from src.wacv.checkpoint import CheckpointManager
 from src.wacv.config import DeviceName, ExperimentConfig
 from src.wacv.evaluation import (
     RankingEvalData,
-    can_score_from_probabilities,
     compute_ranking_metrics,
     ranking_metrics_from_probabilities,
+    ranking_needs_only_probabilities,
 )
 from src.wacv.losses import asmr_semantic_margin_loss, hard_query_infonce
 from src.wacv.monitoring.tracking import RunTracker
@@ -229,9 +229,9 @@ class Trainer:
         return total_loss / total_samples, global_step_delta
 
     def _validate_epoch(
-        self, loader: Iterable[EvalBatch], epoch: int, *, keep_probabilities: bool
+        self, loader: Iterable[EvalBatch], epoch: int, *, collect_probabilities: bool
     ) -> tuple[float, np.ndarray | None]:
-        """Val loss; with ``keep_probabilities`` also the gallery probabilities."""
+        """Mean val loss, plus the val probabilities when ``collect_probabilities``."""
         self.ema_model.eval()
         total_loss = 0.0
         total_samples = 0
@@ -251,7 +251,7 @@ class Trainer:
                 with torch.autocast(device_type=autocast_type, enabled=use_amp):
                     logits = self.ema_model(batch_images)
                     loss = self.criterion(logits, batch_targets)
-                if keep_probabilities:
+                if collect_probabilities:
                     probability_batches.append(
                         torch.sigmoid(logits.float()).cpu().numpy()
                     )
@@ -261,11 +261,13 @@ class Trainer:
         if total_samples == 0:
             raise ValueError("Validation loader is empty")
         probabilities = (
-            np.concatenate(probability_batches, axis=0) if keep_probabilities else None
+            np.concatenate(probability_batches, axis=0)
+            if collect_probabilities
+            else None
         )
         return total_loss / total_samples, probabilities
 
-    def _reuses_val_pass(
+    def _can_rank_from_val_pass(
         self, val_loader: Iterable[EvalBatch], ranking: RankingEvalData | None
     ) -> bool:
         """True when the ranking gallery is the val loader's images, unshuffled.
@@ -275,7 +277,9 @@ class Trainer:
         """
         if ranking is None or ranking.gallery_images is None:
             return False
-        if not can_score_from_probabilities(self.config.ranking, self.config.inference):
+        if not ranking_needs_only_probabilities(
+            self.config.ranking, self.config.inference
+        ):
             return False
         dataset = getattr(val_loader, "dataset", None)
         images = getattr(dataset, "images", None)
@@ -365,8 +369,8 @@ class Trainer:
                 resume_path,
             )
 
-        reuse_val_pass = self._reuses_val_pass(val_loader, ranking)
-        if reuse_val_pass:
+        rank_from_val_pass = self._can_rank_from_val_pass(val_loader, ranking)
+        if rank_from_val_pass:
             self.tracker.logger.info(
                 "per-epoch ranking reuses the val-loss pass probabilities"
             )
@@ -382,7 +386,7 @@ class Trainer:
                 train_loss, step_delta = self._train_epoch(train_loader, epoch)
                 global_step += step_delta
                 val_loss, val_probabilities = self._validate_epoch(
-                    val_loader, epoch, keep_probabilities=reuse_val_pass
+                    val_loader, epoch, collect_probabilities=rank_from_val_pass
                 )
                 self.scheduler.step(val_loss)
                 metrics, postfix, selection_metric = self._epoch_metrics(

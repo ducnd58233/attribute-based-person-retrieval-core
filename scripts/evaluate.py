@@ -175,17 +175,17 @@ def evaluate_checkpoint(
     if ensemble_checkpoint is not None:
         if ensemble_config_path is None:
             raise ValueError("--ensemble-checkpoint requires --ensemble-config")
-        other_config = load_config(ensemble_config_path)
-        if (other_config.model.name, other_config.data.image_size) != (
+        second_config = load_config(ensemble_config_path)
+        if (second_config.model.name, second_config.data.image_size) != (
             config.model.name,
             config.data.image_size,
         ):
             raise ValueError("ensemble members must share model name and image size")
-        other = _load_eval_model(
-            other_config, ensemble_checkpoint, len(attribute_names), device
+        second_model = _load_eval_model(
+            second_config, ensemble_checkpoint, len(attribute_names), device
         )
         model = ProbabilityAverage(
-            [model, other], [ensemble_weight, 1.0 - ensemble_weight]
+            [model, second_model], [ensemble_weight, 1.0 - ensemble_weight]
         ).to(device)
 
     results: dict[str, dict[str, float]] = {}
