@@ -112,3 +112,57 @@ def test_traced_probability_average_runs_on_cuda_after_cpu_trace() -> None:
     with torch.inference_mode():
         on_cuda = traced.cuda()(inputs.cuda()).cpu()
     assert torch.allclose(torch.sigmoid(on_cuda), torch.sigmoid(expected), atol=1e-3)
+
+
+def _partly_frozen_model() -> nn.Module:
+    torch.manual_seed(0)
+    model = nn.Sequential(nn.Linear(6, 6), nn.Linear(6, 3))
+    for parameter in model[0].parameters():
+        parameter.requires_grad = False
+    return model
+
+
+def test_shared_frozen_ema_matches_full_copy_ema() -> None:
+    from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
+
+    from src.wacv.engine import build_ema_model
+
+    model = _partly_frozen_model()
+    full_copy = AveragedModel(
+        model, multi_avg_fn=get_ema_multi_avg_fn(0.9), use_buffers=True
+    )
+    shared = build_ema_model(model, 0.9)
+    optimizer = torch.optim.SGD(
+        (p for p in model.parameters() if p.requires_grad), lr=0.1
+    )
+    for step in range(5):
+        optimizer.zero_grad()
+        model(torch.randn(4, 6) + step).sum().backward()
+        optimizer.step()
+        full_copy.update_parameters(model)
+        shared.update_parameters(model)
+
+    expected = full_copy.state_dict()
+    actual = shared.state_dict()
+    assert actual.keys() == expected.keys()
+    assert all(torch.equal(actual[key], expected[key]) for key in expected)
+
+
+def test_shared_frozen_ema_holds_no_copy_of_frozen_weights() -> None:
+    from src.wacv.engine import build_ema_model
+
+    model = _partly_frozen_model()
+    ema = build_ema_model(model, 0.9)
+    assert ema.module[0].weight is model[0].weight
+    assert ema.module[1].weight is not model[1].weight
+
+
+def test_shared_frozen_ema_reloads_its_own_state() -> None:
+    from src.wacv.engine import build_ema_model
+
+    model = _partly_frozen_model()
+    ema = build_ema_model(model, 0.9)
+    saved = {key: value.clone() for key, value in ema.state_dict().items()}
+    ema.load_state_dict(saved)
+    assert torch.equal(ema.module[1].weight, saved["module.1.weight"])
+    assert ema.module[0].weight is model[0].weight

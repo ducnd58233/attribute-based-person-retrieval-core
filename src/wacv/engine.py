@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import importlib
 import random
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -74,6 +74,63 @@ def seed_everything(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+MultiAverageFn = Callable[[list[torch.Tensor], list[torch.Tensor], torch.Tensor], None]
+PROGRESS_EVERY_STEPS = 50
+
+
+def _skip_shared_tensors(average: MultiAverageFn) -> MultiAverageFn:
+    """Average only EMA tensors that are separate copies of the live ones.
+
+    Frozen parameters are shared between the EMA model and the live model
+    (see ``build_ema_model``); averaging a tensor toward itself is a no-op, so
+    skipping them saves a full pass over the frozen backbone every step.
+    """
+
+    def average_separate(
+        ema_tensors: list[torch.Tensor],
+        live_tensors: list[torch.Tensor],
+        num_averaged: torch.Tensor,
+    ) -> None:
+        pairs = [
+            (ema, live)
+            for ema, live in zip(ema_tensors, live_tensors, strict=True)
+            if ema.data_ptr() != live.data_ptr()
+        ]
+        if pairs:
+            average(
+                [ema for ema, _ in pairs], [live for _, live in pairs], num_averaged
+            )
+
+    return average_separate
+
+
+def build_ema_model(model: nn.Module, decay: float) -> AveragedModel:
+    """EMA copy of ``model`` that shares, rather than copies, frozen parameters.
+
+    An EMA of a parameter that never changes is that parameter, so a frozen
+    backbone (the CLIP-L LoRA runs) needs no second copy in GPU memory. Which
+    parameters are frozen is fixed when the Trainer is built; LP-FT builds a
+    new Trainer after ``unfreeze_backbone``.
+    """
+    ema_model = AveragedModel(
+        model,
+        multi_avg_fn=_skip_shared_tensors(get_ema_multi_avg_fn(decay)),
+        use_buffers=True,
+    )
+    ema_parameters = dict(ema_model.module.named_parameters())
+    for name, parameter in model.named_parameters():
+        if parameter.requires_grad:
+            continue
+        owner_name, _, attribute = name.rpartition(".")
+        owner = ema_model.module.get_submodule(owner_name)
+        if getattr(owner, attribute) is not ema_parameters[name]:
+            raise RuntimeError(
+                f"EMA model layout differs from the live model at {name}"
+            )
+        setattr(owner, attribute, parameter)
+    return ema_model
+
+
 class Trainer:
     """Own training state so fitting, checkpointing, and resume stay coherent."""
 
@@ -100,11 +157,7 @@ class Trainer:
             raise ValueError("losses.asmr_aux requires AsmrTrainContext")
         amp_enabled = config.optimization.amp and device.type == "cuda"
         self.scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
-        self.ema_model = AveragedModel(
-            model,
-            multi_avg_fn=get_ema_multi_avg_fn(config.optimization.ema_decay),
-            use_buffers=True,
-        )
+        self.ema_model = build_ema_model(model, config.optimization.ema_decay)
         self.checkpoints = CheckpointManager(
             model, optimizer, scheduler, self.scaler, self.ema_model, config
         )
@@ -193,7 +246,6 @@ class Trainer:
         self, loader: Iterable[TrainBatch], epoch: int
     ) -> tuple[float, int]:
         self.model.train()
-        total_loss = 0.0
         total_samples = 0
         global_step_delta = 0
         batches = tqdm(
@@ -204,6 +256,9 @@ class Trainer:
         )
         use_amp = self.scaler.is_enabled()
         autocast_type = "cuda" if use_amp else "cpu"
+        # Summed on the device: a .item() per step would make the CPU wait for
+        # the GPU every step instead of queueing the next one.
+        loss_sum = torch.zeros((), dtype=torch.float64, device=self.device)
         for batch in batches:
             batch_query_ids: torch.Tensor | None = None
             if len(batch) == 3:
@@ -220,20 +275,21 @@ class Trainer:
                 )
             self._step_optimizer(loss, use_amp=use_amp)
             batch_size = batch_targets.shape[0]
-            total_loss += loss.detach().item() * batch_size
+            loss_sum += loss.detach().double() * batch_size
             total_samples += batch_size
             global_step_delta += 1
-            batches.set_postfix(loss=f"{loss.detach().item():.4f}")
+            if global_step_delta % PROGRESS_EVERY_STEPS == 0:
+                batches.set_postfix(loss=f"{loss.detach().item():.4f}")
         if total_samples == 0:
             raise ValueError("Training loader is empty")
-        return total_loss / total_samples, global_step_delta
+        return loss_sum.item() / total_samples, global_step_delta
 
     def _validate_epoch(
         self, loader: Iterable[EvalBatch], epoch: int, *, collect_probabilities: bool
     ) -> tuple[float, np.ndarray | None]:
         """Mean val loss, plus the val probabilities when ``collect_probabilities``."""
         self.ema_model.eval()
-        total_loss = 0.0
+        loss_sum = torch.zeros((), dtype=torch.float64, device=self.device)
         total_samples = 0
         probability_batches: list[np.ndarray] = []
         batches = tqdm(
@@ -256,7 +312,7 @@ class Trainer:
                         torch.sigmoid(logits.float()).cpu().numpy()
                     )
                 batch_size = batch_targets.shape[0]
-                total_loss += loss.item() * batch_size
+                loss_sum += loss.double() * batch_size
                 total_samples += batch_size
         if total_samples == 0:
             raise ValueError("Validation loader is empty")
@@ -265,7 +321,7 @@ class Trainer:
             if collect_probabilities
             else None
         )
-        return total_loss / total_samples, probabilities
+        return loss_sum.item() / total_samples, probabilities
 
     def _can_rank_from_val_pass(
         self, val_loader: Iterable[EvalBatch], ranking: RankingEvalData | None
