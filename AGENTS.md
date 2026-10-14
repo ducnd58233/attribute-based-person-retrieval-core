@@ -422,13 +422,17 @@ here.
   does not have to spend, and skipping straight to local silently defeats
   the reason `remote-training.py` exists.
 
-- **Each backend is a lane; fill every free lane (MUST):** Colab, Kaggle,
-  Lightning and the local GPU each run at most one training card at a time,
-  and different cards may run on different lanes at once. When a lane is
-  busy, the next queued card starts on the next free lane in the order above
-  instead of waiting. A card's own fallback (previous bullet) moves it to the
-  next free lane, never onto a lane another card holds. Record the lane in
-  the card's `STATUS.md` so another session does not double-book it.
+- **Allocate every free GPU slot (MUST):** a slot is one GPU session a
+  backend can run at once: Colab 1, Kaggle 2 (concurrent GPU sessions per
+  account), Lightning 1, the local GPU 1. Each slot runs at most one training
+  card, and every free slot gets a runnable card in the same pass: the top
+  card on the most preferred free slot in the order above, the next card on
+  the next free slot, without waiting for the first to finish. A card's own
+  fallback (previous bullet) moves it to the next free slot, never onto a
+  slot another card holds. Record lane, slot and remote id in the card's
+  `STATUS.md` so another session does not double-book it; the workspace
+  `experiments/AGENT-LOOP-PROMPT.md` section 4 says what fills a slot when
+  the queue is short.
 
   A **code-logic failure** — a traceback or exception from inside the
   staged training code itself, visible in the downloaded run's logs, a
