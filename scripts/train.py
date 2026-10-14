@@ -103,7 +103,9 @@ def build_loaders(
         val_gt, config.data.root, eval_transform, attribute_names=attribute_names
     )
     train_loader = build_loader(train_dataset, config.data, device, shuffle=True)
-    val_loader = build_loader(val_dataset, config.data, device, shuffle=False)
+    val_loader = build_loader(
+        val_dataset, config.data, device, shuffle=False, train=False
+    )
 
     positive_rates = train_gt[list(attribute_names)].astype(float).mean()
     positive_rates = positive_rates.clip(lower=1e-6)
@@ -152,6 +154,7 @@ def build_ranking_eval(
         queries=queries,
         gallery_attrs=gallery_attrs,
         gallery_loader=loader,
+        gallery_images=tuple(str(image) for image in ground_truth["image"]),
     )
 
 
