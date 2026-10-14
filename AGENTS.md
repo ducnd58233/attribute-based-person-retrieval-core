@@ -547,3 +547,48 @@ here.
   `src/wacv/remote/stage.py`).
 
 </delivery_gates>
+
+<required>
+
+## Mistakes already made here, and the rule each one left (MUST)
+
+Each rule below comes from a real mistake on branch
+`feat/e126-probability-average` (2026-10-14/15). Follow them before the
+same mistake costs an upload slot or a training day.
+
+- **Check a library claim against the installed source before writing it.**
+  A docstring said DataLoader workers leave numpy unseeded; torch 2.14 seeds
+  `random`, numpy and torch in every worker
+  (`torch/utils/data/_utils/worker.py`). Read the source in `.venv` first.
+- **Never build a tensor inside a traced `forward`.** `torch.jit.trace`
+  freezes it to the tracing device: the E126 package pinned its averaging
+  weights to CPU and would have failed on the A10. Use a registered buffer.
+- **Smoke every package on the CUDA path, not only CPU or Docker-CPU.**
+  `run.py` silently falls back to CPU when the CUDA probe fails, which turns
+  a device bug into a timeout. Check the smoke log says `device=cuda`, and
+  compare package probabilities with the eager model on a few val images.
+- **Rebuild or refresh the zip after any `submission/run.py` change,** and
+  record its sha256 where the package is documented.
+- **No performance setting without a measurement.** An unmeasured
+  `prefetch_factor=4` doubled pinned memory; persistent val workers kept a
+  second worker set alive all run. Eval loaders do not keep workers.
+- **A timing is a proxy only on an idle GPU.** Run `nvidia-smi` first; a
+  number taken while another job trains is recorded as contended, never as
+  the proxy.
+- **"No behaviour change" needs proof.** Keep the old implementation as a
+  test oracle and compare on real data (e.g. `evaluate_ranking` before and
+  after: max abs difference 0.0 on task2 val).
+- **Assert in the test body.** An assertion hidden in a helper reads as a
+  test that asserts nothing; return the differences and assert on them.
+- **After `git commit`, `git status` must be clean of the files you meant to
+  include** (a missed `scripts/train.py` left the val-loader change out of a
+  commit). Push branches as `git push origin <branch>`; a bare `git push`
+  can target `main`, which the workspace hook blocks.
+- **Multi-line edits go in a script file.** Never combine a heredoc with a
+  second stdin redirect (`python - <<EOF < /dev/null` opens a REPL and
+  hangs), and never chain two heredocs with `||`.
+- **Name by what the caller reads.** Plain verbs that match sibling methods
+  (`add_lora_adapters` next to `freeze_backbone`), `can_`/`is_` for yes/no
+  answers, and the ledgers' own words (`partner_model`).
+
+</required>
