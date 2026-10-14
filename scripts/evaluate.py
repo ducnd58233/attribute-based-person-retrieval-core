@@ -61,7 +61,7 @@ def parse_args() -> argparse.Namespace:
         "--ensemble-checkpoint",
         type=Path,
         default=None,
-        help="second checkpoint whose probabilities are averaged with the primary",
+        help="partner checkpoint whose probabilities are averaged with the primary",
     )
     parser.add_argument(
         "--ensemble-config",
@@ -73,7 +73,7 @@ def parse_args() -> argparse.Namespace:
         "--ensemble-weight",
         type=float,
         default=0.5,
-        help="weight on the primary model probabilities; the rest goes to the second",
+        help="weight on the primary model probabilities; the rest goes to the partner",
     )
     return parser.parse_args()
 
@@ -175,17 +175,17 @@ def evaluate_checkpoint(
     if ensemble_checkpoint is not None:
         if ensemble_config_path is None:
             raise ValueError("--ensemble-checkpoint requires --ensemble-config")
-        second_config = load_config(ensemble_config_path)
-        if (second_config.model.name, second_config.data.image_size) != (
+        partner_config = load_config(ensemble_config_path)
+        if (partner_config.model.name, partner_config.data.image_size) != (
             config.model.name,
             config.data.image_size,
         ):
             raise ValueError("ensemble members must share model name and image size")
-        second_model = _load_eval_model(
-            second_config, ensemble_checkpoint, len(attribute_names), device
+        partner_model = _load_eval_model(
+            partner_config, ensemble_checkpoint, len(attribute_names), device
         )
         model = ProbabilityAverage(
-            [model, second_model], [ensemble_weight, 1.0 - ensemble_weight]
+            [model, partner_model], [ensemble_weight, 1.0 - ensemble_weight]
         ).to(device)
 
     results: dict[str, dict[str, float]] = {}

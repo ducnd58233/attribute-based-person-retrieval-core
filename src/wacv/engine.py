@@ -21,9 +21,9 @@ from src.wacv.checkpoint import CheckpointManager
 from src.wacv.config import DeviceName, ExperimentConfig
 from src.wacv.evaluation import (
     RankingEvalData,
+    can_rank_from_probabilities,
     compute_ranking_metrics,
     ranking_metrics_from_probabilities,
-    ranking_needs_only_probabilities,
 )
 from src.wacv.losses import asmr_semantic_margin_loss, hard_query_infonce
 from src.wacv.monitoring.tracking import RunTracker
@@ -277,9 +277,7 @@ class Trainer:
         """
         if ranking is None or ranking.gallery_images is None:
             return False
-        if not ranking_needs_only_probabilities(
-            self.config.ranking, self.config.inference
-        ):
+        if not can_rank_from_probabilities(self.config.ranking, self.config.inference):
             return False
         dataset = getattr(val_loader, "dataset", None)
         images = getattr(dataset, "images", None)

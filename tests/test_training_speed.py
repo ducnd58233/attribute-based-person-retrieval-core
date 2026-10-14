@@ -16,9 +16,9 @@ from src.wacv.config import DataConfig, InferenceConfig, RankingConfig
 from src.wacv.data import AttributeDataset, build_loader
 from src.wacv.evaluation import (
     RankingEvalData,
+    can_rank_from_probabilities,
     compute_ranking_metrics,
     ranking_metrics_from_probabilities,
-    ranking_needs_only_probabilities,
 )
 
 
@@ -89,9 +89,9 @@ def test_scoring_reused_probabilities_matches_full_pass(tmp_path: Path) -> None:
 
 def test_reuse_needs_identity_tta_and_no_smoothing() -> None:
     ranking = RankingConfig()
-    assert ranking_needs_only_probabilities(ranking, InferenceConfig())
+    assert can_rank_from_probabilities(ranking, InferenceConfig())
     hflip = InferenceConfig.model_validate({"tta": ["identity", "hflip"]})
-    assert not ranking_needs_only_probabilities(ranking, hflip)
+    assert not can_rank_from_probabilities(ranking, hflip)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")

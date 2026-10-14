@@ -39,7 +39,7 @@ class RankingEvalData:
     gallery_images: tuple[str, ...] | None = None
 
 
-def ranking_needs_only_probabilities(
+def can_rank_from_probabilities(
     ranking_config: RankingConfig, inference_config: InferenceConfig
 ) -> bool:
     """True when ranking needs only identity-view probabilities.

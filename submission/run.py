@@ -260,7 +260,7 @@ def load_model() -> None:
     _STATE["transform"] = _image_transform_from_card(card)
 
 
-def _load_image_tensor(
+def _load_gallery_image(
     item: dict[str, Any], transform: transforms.Compose
 ) -> torch.Tensor:
     image = Image.open(item["image_path"]).convert("RGB")
@@ -288,14 +288,14 @@ def _iter_gallery_tensors(
     def submit_batch(start: int) -> list[Future[torch.Tensor]]:
         assert pool is not None
         batch = gallery[start : start + BATCH_SIZE]
-        return [pool.submit(_load_image_tensor, item, transform) for item in batch]
+        return [pool.submit(_load_gallery_image, item, transform) for item in batch]
 
     try:
         next_batch = submit_batch(0) if pool is not None and total else []
         for start in batch_starts:
             if pool is None:
                 batch = gallery[start : start + BATCH_SIZE]
-                tensors = [_load_image_tensor(item, transform) for item in batch]
+                tensors = [_load_gallery_image(item, transform) for item in batch]
             else:
                 current_batch = next_batch
                 if start + BATCH_SIZE < total:

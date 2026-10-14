@@ -135,7 +135,7 @@ class ClipAttributeClassifier(nn.Module):
         """Unfreeze the vision tower (full fine-tune stage)."""
         set_requires_grad(self.visual, True)
 
-    def inject_lora(
+    def add_lora_adapters(
         self,
         *,
         rank: int,
@@ -232,7 +232,9 @@ def build_clip_attribute_classifier(
         image_size=(tower.image_height, tower.image_width),
     )
     if lora_rank > 0:
-        classifier.inject_lora(rank=lora_rank, alpha=lora_alpha, targets=lora_targets)
+        classifier.add_lora_adapters(
+            rank=lora_rank, alpha=lora_alpha, targets=lora_targets
+        )
     return classifier
 
 
