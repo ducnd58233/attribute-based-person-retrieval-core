@@ -19,7 +19,12 @@ from tqdm.contrib.logging import logging_redirect_tqdm
 
 from src.wacv.checkpoint import CheckpointManager
 from src.wacv.config import DeviceName, ExperimentConfig
-from src.wacv.evaluation import RankingEvalData, compute_ranking_metrics
+from src.wacv.evaluation import (
+    RankingEvalData,
+    can_score_from_probabilities,
+    compute_ranking_metrics,
+    ranking_metrics_from_probabilities,
+)
 from src.wacv.losses import asmr_semantic_margin_loss, hard_query_infonce
 from src.wacv.monitoring.tracking import RunTracker
 from src.wacv.query_adapter import AttributeModelWithHardQuery
@@ -223,10 +228,14 @@ class Trainer:
             raise ValueError("Training loader is empty")
         return total_loss / total_samples, global_step_delta
 
-    def _validate_epoch(self, loader: Iterable[EvalBatch], epoch: int) -> float:
+    def _validate_epoch(
+        self, loader: Iterable[EvalBatch], epoch: int, *, keep_probabilities: bool
+    ) -> tuple[float, np.ndarray | None]:
+        """Val loss; with ``keep_probabilities`` also the gallery probabilities."""
         self.ema_model.eval()
         total_loss = 0.0
         total_samples = 0
+        probability_batches: list[np.ndarray] = []
         batches = tqdm(
             loader,
             desc=f"validate {epoch + 1}/{self.config.optimization.epochs}",
@@ -240,15 +249,45 @@ class Trainer:
                 batch_images = images.to(self.device, non_blocking=True)
                 batch_targets = targets.to(self.device, non_blocking=True)
                 with torch.autocast(device_type=autocast_type, enabled=use_amp):
-                    loss = self.criterion(self.ema_model(batch_images), batch_targets)
+                    logits = self.ema_model(batch_images)
+                    loss = self.criterion(logits, batch_targets)
+                if keep_probabilities:
+                    probability_batches.append(
+                        torch.sigmoid(logits.float()).cpu().numpy()
+                    )
                 batch_size = batch_targets.shape[0]
                 total_loss += loss.item() * batch_size
                 total_samples += batch_size
         if total_samples == 0:
             raise ValueError("Validation loader is empty")
-        return total_loss / total_samples
+        probabilities = (
+            np.concatenate(probability_batches, axis=0) if keep_probabilities else None
+        )
+        return total_loss / total_samples, probabilities
 
-    def _ranking_metrics(self, ranking: RankingEvalData) -> dict[str, float]:
+    def _reuses_val_pass(
+        self, val_loader: Iterable[EvalBatch], ranking: RankingEvalData | None
+    ) -> bool:
+        """True when the ranking gallery is the val loader's images, unshuffled.
+
+        Then the val-loss forward already yields the identity-view probabilities
+        ranking needs, and the second full gallery pass can be skipped.
+        """
+        if ranking is None or ranking.gallery_images is None:
+            return False
+        if not can_score_from_probabilities(self.config.ranking, self.config.inference):
+            return False
+        dataset = getattr(val_loader, "dataset", None)
+        images = getattr(dataset, "images", None)
+        return images is not None and tuple(images) == ranking.gallery_images
+
+    def _ranking_metrics(
+        self, ranking: RankingEvalData, probabilities: np.ndarray | None
+    ) -> dict[str, float]:
+        if probabilities is not None:
+            return ranking_metrics_from_probabilities(
+                probabilities, ranking, self.config.ranking
+            )
         return compute_ranking_metrics(
             self.ema_model,
             ranking,
@@ -270,6 +309,7 @@ class Trainer:
         train_loss: float,
         val_loss: float,
         ranking: RankingEvalData | None,
+        probabilities: np.ndarray | None,
     ) -> tuple[dict[str, float], dict[str, str], float]:
         metrics: dict[str, float] = {
             "train/loss": train_loss,
@@ -283,7 +323,7 @@ class Trainer:
         if ranking is None:
             return metrics, postfix, val_loss
 
-        ranking_metrics = self._ranking_metrics(ranking)
+        ranking_metrics = self._ranking_metrics(ranking, probabilities)
         for key, value in ranking_metrics.items():
             metrics[f"val/{key}"] = value
         postfix["mAP"] = f"{ranking_metrics['mAP']:.4f}"
@@ -325,6 +365,11 @@ class Trainer:
                 resume_path,
             )
 
+        reuse_val_pass = self._reuses_val_pass(val_loader, ranking)
+        if reuse_val_pass:
+            self.tracker.logger.info(
+                "per-epoch ranking reuses the val-loss pass probabilities"
+            )
         end_epoch = start_epoch - 1
         epoch_bar = tqdm(
             range(start_epoch, self.config.optimization.epochs),
@@ -336,10 +381,12 @@ class Trainer:
             for epoch in epoch_bar:
                 train_loss, step_delta = self._train_epoch(train_loader, epoch)
                 global_step += step_delta
-                val_loss = self._validate_epoch(val_loader, epoch)
+                val_loss, val_probabilities = self._validate_epoch(
+                    val_loader, epoch, keep_probabilities=reuse_val_pass
+                )
                 self.scheduler.step(val_loss)
                 metrics, postfix, selection_metric = self._epoch_metrics(
-                    train_loss, val_loss, ranking
+                    train_loss, val_loss, ranking, val_probabilities
                 )
                 best_metric, improved = self._update_best(
                     selection_metric, best_metric, select_higher_is_better

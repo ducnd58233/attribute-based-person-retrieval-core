@@ -1,0 +1,64 @@
+# E129 H129 — 969857 teacher recipe with LoRA on attention q/k/v (fused
+# in_proj), out_proj and MLP c_fc/c_proj instead of out_proj only. Same rank,
+# schedule, seed and train data (organizer train split, PA100k + PETA).
+# Bars (frozen, workspace HYPOTHESIS H129): identity ID-val >= 0.7304,
+# LODO-M >= 0.7182, proxy <= 240 s. Do not retune rank or targets after val.
+# num_workers 8: DataLoader workers (E120-era configs ran 0, data-bound).
+
+model:
+  name: clip_vit_l14
+  pretrained: true
+  dropout: 0.1
+  freeze_backbone: true
+  lora_rank: 16
+  lora_alpha: 16.0
+  lora_targets:
+    - out_proj
+    - in_proj
+    - mlp
+
+data:
+  root: data
+  batch_size: 8
+  num_workers: 8
+  eval_batch_size: 64
+  limit: null
+  train_augmentation: true
+  image_size: [224, 112]
+  train_domains:
+    - PA100k
+    - PETA
+
+optimization:
+  epochs: 8
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  pos_weight_clip: 10.0
+  amp: true
+  grad_clip_norm: 1.0
+  ema_decay: 0.999
+  scheduler_factor: 0.1
+  scheduler_patience: 2
+  label_smoothing: 0.05
+  early_stop_patience: 4
+  lp_ft: false
+
+run:
+  name: e129_teacher_lora_capacity
+  output_dir: runs
+  resume: true
+  seed: 42
+  device: auto
+  progress: true
+
+ranking:
+  distance: hybrid
+  temperature: 1.0
+  alpha: 0.5
+  query_norm: dual_softmax
+  query_norm_tau: 0.05
+
+inference:
+  tta:
+    - identity
+  tta_scale: 1.15

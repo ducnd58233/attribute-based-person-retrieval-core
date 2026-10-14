@@ -23,10 +23,16 @@ class ProbabilityAverage(nn.Module):
             raise ValueError(f"weights must be >= 0 and sum to 1, got {weights}")
         self.members = nn.ModuleList(members)
         self.weights = tuple(float(w) for w in weights)
+        # A buffer, not a tensor built in forward: torch.jit.trace would freeze
+        # that tensor to the tracing device and break the package on CUDA.
+        self.register_buffer(
+            "member_weights",
+            torch.tensor(self.weights, dtype=torch.float32).view(-1, 1, 1),
+        )
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
         probs = torch.stack(
             [torch.sigmoid(member(images).float()) for member in self.members]
         )
-        weights = torch.tensor(self.weights, device=probs.device).view(-1, 1, 1)
+        weights = self.get_buffer("member_weights").float()
         return torch.logit((weights * probs).sum(dim=0), eps=1e-6)

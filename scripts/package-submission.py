@@ -54,6 +54,38 @@ def parse_args() -> argparse.Namespace:
         help="Trainer checkpoint (full payload or state_dict)",
     )
     parser.add_argument(
+        "--member",
+        type=Path,
+        action="append",
+        default=[],
+        metavar="CHECKPOINT",
+        help=(
+            "Extra checkpoint built from the same --config; the package then "
+            "traces an equal-weight probability average of all checkpoints"
+        ),
+    )
+    parser.add_argument(
+        "--decode-workers",
+        type=int,
+        default=0,
+        help="inference_decode_workers in model_card.json (0 = serial decode)",
+    )
+    parser.add_argument(
+        "--weights-dtype",
+        choices=("fp32", "fp16"),
+        default="fp32",
+        help=(
+            "Store TorchScript weights in fp16 (half the zip and load time); "
+            "run.py upcasts them to fp32 after loading"
+        ),
+    )
+    parser.add_argument(
+        "--amp",
+        choices=("none", "bf16", "fp16"),
+        default="none",
+        help="inference_amp in model_card.json (CUDA autocast at inference)",
+    )
+    parser.add_argument(
         "--config",
         type=Path,
         default=DEFAULT_CONFIG_PATH,
@@ -119,7 +151,7 @@ def _resolve_neighbour_smooth(
 
 
 def _export_weights(
-    checkpoint: Path,
+    checkpoints: list[Path],
     config_path: Path,
     destination: Path,
     *,
@@ -129,16 +161,29 @@ def _export_weights(
     from src.wacv.checkpoint import load_model_weights
     from src.wacv.config import load_config
     from src.wacv.models import build_model
+    from src.wacv.models.ensemble import ProbabilityAverage
     from src.wacv.normalization import normalization_for_model
 
     config = load_config(config_path)
     gt_path = config.data.root / "annotations" / "task1" / "train" / "gt.csv"
     num_attributes = len(attribute_names_from_gt(gt_path))
-    model = build_model(
-        config.model.model_copy(update={"pretrained": False}),
-        num_attributes=num_attributes,
-    )
-    load_model_weights(checkpoint.resolve(), model, map_location=torch.device("cpu"))
+    members: list[torch.nn.Module] = []
+    for checkpoint in checkpoints:
+        member = build_model(
+            config.model.model_copy(update={"pretrained": False}),
+            num_attributes=num_attributes,
+        )
+        load_model_weights(
+            checkpoint.resolve(), member, map_location=torch.device("cpu")
+        )
+        members.append(member)
+    model: torch.nn.Module = members[0]
+    if len(members) > 1:
+        if not disable_neighbour_smooth:
+            raise ValueError(
+                "a probability-average package needs --no-neighbour-smooth"
+            )
+        model = ProbabilityAverage(members, [1.0 / len(members)] * len(members))
     destination.parent.mkdir(parents=True, exist_ok=True)
     weight_format = "state_dict"
     image_h, image_w = config.data.image_size
@@ -167,7 +212,8 @@ def _export_weights(
         "num_attributes": num_attributes,
         "hard_query_adapter": bool(config.model.hard_query_adapter),
         "adapter_dim": int(config.model.adapter_dim),
-        "source_checkpoint": str(checkpoint),
+        "source_checkpoint": str(checkpoints[0]),
+        "source_checkpoints": [str(path) for path in checkpoints],
         "weight_format": weight_format,
         "image_size": [image_h, image_w],
         "image_mean": list(stats.mean),
@@ -184,6 +230,17 @@ def _export_weights(
         "inference_tta_scale": float(config.inference.tta_scale),
         "neighbour_smooth": neighbour_smooth,
     }
+
+
+def _halve_torchscript(path: Path, card: dict[str, Any]) -> None:
+    """Rewrite a TorchScript package with fp16 parameters and buffers."""
+    if card["weight_format"] != "torchscript":
+        raise ValueError(
+            "--weights-dtype fp16 needs a TorchScript (CLIP/DINOv2) package"
+        )
+    module = torch.jit.load(str(path), map_location="cpu")
+    module.half()
+    module.save(str(path))
 
 
 def _zip_submission(source: Path, destination: Path) -> None:
@@ -223,7 +280,7 @@ def main() -> None:
     assets = out / "assets"
     assets.mkdir()
     card = _export_weights(
-        args.checkpoint,
+        [args.checkpoint, *args.member],
         args.config,
         assets / "model.pt",
         disable_neighbour_smooth=bool(args.no_neighbour_smooth),
@@ -242,6 +299,11 @@ def main() -> None:
         if not views:
             raise ValueError("--tta requires at least one view name")
         card["inference_tta"] = views
+    card["weight_dtype"] = str(args.weights_dtype)
+    if args.weights_dtype == "fp16":
+        _halve_torchscript(assets / "model.pt", card)
+    card["inference_decode_workers"] = int(args.decode_workers)
+    card["inference_amp"] = str(args.amp)
     if card["neighbour_smooth"] is not None and "identity" not in card["inference_tta"]:
         raise ValueError("neighbour_smooth takes its features from the identity view")
     (assets / "model_card.json").write_text(

@@ -120,3 +120,32 @@ def test_neighbour_smooth_mirrors_library_blend() -> None:
 
     np.testing.assert_allclose(smoothed[0], probabilities[1], atol=1e-5)
     np.testing.assert_allclose(smoothed[1], probabilities[0], atol=1e-5)
+
+
+class _MeanModel(nn.Module):
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        return images.mean(dim=(2, 3))
+
+
+def test_decode_workers_match_serial_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_run_module()
+    module._STATE["model"] = _MeanModel()
+    module._STATE["device"] = torch.device("cpu")
+    monkeypatch.setattr(module, "BATCH_SIZE", 2)
+    gallery = _make_gallery(tmp_path, count=7)
+
+    module._STATE["card"] = {}
+    serial, _ = module._predict_gallery(gallery)
+    module._STATE["card"] = {"inference_decode_workers": 4, "inference_amp": "bf16"}
+    threaded, _ = module._predict_gallery(gallery)
+
+    assert threaded.shape == (7, 3)
+    np.testing.assert_allclose(threaded, serial)
+
+
+def test_autocast_rejects_unknown_amp_on_cuda() -> None:
+    module = _load_run_module()
+    with pytest.raises(ValueError, match="inference_amp"):
+        module._autocast(torch.device("cuda"), {"inference_amp": "int8"})

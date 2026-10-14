@@ -7,6 +7,8 @@ Weights live under assets/ (written by scripts/package_submission.py).
 from __future__ import annotations
 
 import json
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Protocol, cast
 
@@ -239,6 +241,9 @@ def load_model() -> None:
     load_device = torch.device("cuda" if prefer_cuda else "cpu")
     if str(card.get("weight_format", "state_dict")) == "torchscript":
         model = torch.jit.load(WEIGHTS_PATH, map_location=load_device)
+        if str(card.get("weight_dtype", "fp32")) == "fp16":
+            # Stored half to halve the zip; compute stays fp32 (or card autocast).
+            model.float()
     else:
         model = _build_model(card)
         state = torch.load(WEIGHTS_PATH, map_location=load_device, weights_only=True)
@@ -255,24 +260,59 @@ def load_model() -> None:
     _STATE["transform"] = _image_transform_from_card(card)
 
 
+def _decode(item: dict[str, Any], transform: transforms.Compose) -> torch.Tensor:
+    image = Image.open(item["image_path"]).convert("RGB")
+    tensor = transform(image)
+    if not isinstance(tensor, torch.Tensor):
+        raise TypeError("Image transform must return a tensor")
+    return tensor
+
+
 def _iter_gallery_tensors(gallery: list[dict[str, Any]], device: torch.device) -> Any:
+    """Yield batches; with decode workers the next batch decodes during this one."""
     total = len(gallery)
     transform = _STATE.get("transform", IMAGE_TRANSFORM)
     if not isinstance(transform, transforms.Compose):
         transform = IMAGE_TRANSFORM
-    for start in range(0, total, BATCH_SIZE):
+    card = _STATE["card"] if isinstance(_STATE.get("card"), dict) else {}
+    workers = int(card.get("inference_decode_workers", 0))
+    starts = list(range(0, total, BATCH_SIZE))
+    pool = ThreadPoolExecutor(max_workers=workers) if workers > 0 else None
+
+    def submit(start: int) -> list[Future[torch.Tensor]]:
+        assert pool is not None
         chunk = gallery[start : start + BATCH_SIZE]
-        tensors: list[torch.Tensor] = []
-        for item in chunk:
-            image = Image.open(item["image_path"]).convert("RGB")
-            tensor = transform(image)
-            if not isinstance(tensor, torch.Tensor):
-                raise TypeError("Image transform must return a tensor")
-            tensors.append(tensor)
-        images = torch.stack(tensors, dim=0).to(device, non_blocking=True)
-        done = min(start + BATCH_SIZE, total)
-        print(f"[rank_gallery] {done}/{total} gallery images processed", flush=True)
-        yield images
+        return [pool.submit(_decode, item, transform) for item in chunk]
+
+    try:
+        pending = submit(starts[0]) if pool is not None and starts else []
+        for position, start in enumerate(starts):
+            if pool is None:
+                chunk = gallery[start : start + BATCH_SIZE]
+                tensors = [_decode(item, transform) for item in chunk]
+            else:
+                current = pending
+                if position + 1 < len(starts):
+                    pending = submit(starts[position + 1])
+                tensors = [future.result() for future in current]
+            images = torch.stack(tensors, dim=0).to(device, non_blocking=True)
+            done = min(start + BATCH_SIZE, total)
+            print(f"[rank_gallery] {done}/{total} gallery images processed", flush=True)
+            yield images
+    finally:
+        if pool is not None:
+            pool.shutdown(wait=False, cancel_futures=True)
+
+
+def _autocast(device: torch.device, card: dict[str, Any]) -> Any:
+    """Half-precision autocast on CUDA when the card asks for it."""
+    amp = str(card.get("inference_amp", "none"))
+    if device.type != "cuda" or amp == "none":
+        return nullcontext()
+    dtypes = {"bf16": torch.bfloat16, "fp16": torch.float16}
+    if amp not in dtypes:
+        raise ValueError(f"Unknown inference_amp {amp!r}; expected none/bf16/fp16")
+    return torch.autocast(device_type="cuda", dtype=dtypes[amp])
 
 
 def _apply_tta_view(
@@ -317,7 +357,7 @@ def _predict_gallery(
     tta_scale = float(card.get("inference_tta_scale", 1.15))
     batches: list[np.ndarray] = []
     feature_batches: list[np.ndarray] = []
-    with torch.inference_mode():
+    with torch.inference_mode(), _autocast(device, card):
         for images in _iter_gallery_tensors(gallery, device):
             probs_sum: torch.Tensor | None = None
             for view in tta_views:
@@ -327,7 +367,7 @@ def _predict_gallery(
                     if not isinstance(output, tuple):
                         raise TypeError("model must return (logits, features)")
                     feature_batches.append(output[1].float().cpu().numpy())
-                probs = torch.sigmoid(logits)
+                probs = torch.sigmoid(logits.float())
                 probs_sum = probs if probs_sum is None else probs_sum + probs
             assert probs_sum is not None
             batches.append((probs_sum / float(len(tta_views))).float().cpu().numpy())

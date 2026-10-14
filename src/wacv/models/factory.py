@@ -33,6 +33,7 @@ def build_model(config: ModelConfig, *, num_attributes: int) -> nn.Module:
             dropout=config.dropout,
             lora_rank=max(int(config.lora_rank), 16),
             lora_alpha=float(config.lora_alpha),
+            lora_targets=tuple(config.lora_targets),
         )
         # LoRA path always keeps the base tower frozen.
         backbone.freeze_backbone()

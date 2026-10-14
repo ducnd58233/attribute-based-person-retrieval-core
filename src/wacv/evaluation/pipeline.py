@@ -36,6 +36,35 @@ class RankingEvalData:
     queries: np.ndarray
     gallery_attrs: np.ndarray
     gallery_loader: Iterable[tuple[torch.Tensor, torch.Tensor]]
+    gallery_images: tuple[str, ...] | None = None
+
+
+def can_score_from_probabilities(
+    ranking_config: RankingConfig, inference_config: InferenceConfig
+) -> bool:
+    """True when ranking needs nothing but identity-view probabilities."""
+    return (
+        list(inference_config.tta) == ["identity"]
+        and ranking_config.neighbour_smooth is None
+        and ranking_config.distance != "clear_hard"
+    )
+
+
+def ranking_metrics_from_probabilities(
+    probabilities: np.ndarray,
+    data: RankingEvalData,
+    ranking_config: RankingConfig,
+) -> dict[str, float]:
+    """Rank and score already-predicted gallery probabilities (no model pass)."""
+    distances = rank_distances(
+        data.queries,
+        probabilities,
+        ranking_config,
+        temperature=float(ranking_config.temperature),
+    )
+    metrics = evaluate_ranking(data.queries, data.gallery_attrs, distances)
+    metrics["mA"] = mean_accuracy(probabilities, data.gallery_attrs)
+    return metrics
 
 
 def _write_calibration(path: Path, temperatures: np.ndarray) -> None:
@@ -103,6 +132,7 @@ def compute_ranking_metrics(
         progress=progress,
         tta=inference.tta,
         tta_scale=float(inference.tta_scale),
+        amp=inference.amp,
     )
     score_probabilities = probabilities
     if ranking_config.neighbour_smooth is not None:

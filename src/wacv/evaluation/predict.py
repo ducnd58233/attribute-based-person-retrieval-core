@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+from contextlib import AbstractContextManager, nullcontext
 from typing import Protocol, runtime_checkable
 
 import numpy as np
@@ -53,6 +54,18 @@ def apply_tta_view(
     raise ValueError(f"Unknown TTA view {view!r}")
 
 
+_AMP_DTYPES = {"bf16": torch.bfloat16, "fp16": torch.float16}
+
+
+def eval_autocast(device: torch.device, amp: str) -> AbstractContextManager[object]:
+    """CUDA autocast for ``amp`` in {bf16, fp16}; a no-op for none or on CPU."""
+    if amp == "none" or device.type != "cuda":
+        return nullcontext()
+    if amp not in _AMP_DTYPES:
+        raise ValueError(f"Unknown amp {amp!r}; expected none/bf16/fp16")
+    return torch.autocast(device_type="cuda", dtype=_AMP_DTYPES[amp])
+
+
 def predict_probabilities(
     model: nn.Module,
     loader: Iterable[tuple[torch.Tensor, torch.Tensor]],
@@ -61,20 +74,25 @@ def predict_probabilities(
     progress: bool,
     tta: Sequence[str] | None = None,
     tta_scale: float = 1.15,
+    amp: str = "none",
 ) -> np.ndarray:
-    """Predict gallery attribute probabilities, optionally averaging TTA views."""
+    """Predict gallery attribute probabilities, optionally averaging TTA views.
+
+    ``amp`` (none/bf16/fp16) autocasts the forward on CUDA; probabilities are
+    always computed in float32.
+    """
     model.eval()
     views: Sequence[str] = tuple(tta) if tta else _DEFAULT_TTA
     if not views:
         views = _DEFAULT_TTA
     batches: list[np.ndarray] = []
-    with torch.inference_mode():
+    with torch.inference_mode(), eval_autocast(device, amp):
         for images, _ in tqdm(loader, desc="predict", disable=not progress):
             batch = images.to(device, non_blocking=True)
             probs_sum: torch.Tensor | None = None
             for view in views:
                 logits = model(apply_tta_view(batch, view, scale=tta_scale))
-                probs = torch.sigmoid(logits)
+                probs = torch.sigmoid(logits.float())
                 probs_sum = probs if probs_sum is None else probs_sum + probs
             assert probs_sum is not None
             batches.append((probs_sum / float(len(views))).cpu().numpy())

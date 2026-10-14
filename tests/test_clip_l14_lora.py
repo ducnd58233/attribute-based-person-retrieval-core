@@ -45,3 +45,29 @@ def test_lora_parametrization_keeps_weight_attr_and_starts_as_base() -> None:
     ]
     assert lora_params
     assert not base.get_parameter("parametrizations.weight.original").requires_grad
+
+
+def test_lora_on_mha_in_proj_starts_as_base_and_trains_only_adapters() -> None:
+    from src.wacv.models.lora import inject_lora_into_parameter
+
+    torch.manual_seed(0)
+    attn = torch.nn.MultiheadAttention(8, 2, batch_first=True)
+    tokens = torch.randn(2, 5, 8)
+    before, _ = attn(tokens, tokens, tokens, need_weights=False)
+    inject_lora_into_parameter(attn, "in_proj_weight", rank=2, alpha=4.0)
+    after, _ = attn(tokens, tokens, tokens, need_weights=False)
+    assert is_parametrized(attn, "in_proj_weight")
+    assert torch.allclose(before, after, atol=1e-6)
+    trainable = {n for n, p in attn.named_parameters() if p.requires_grad}
+    assert "parametrizations.in_proj_weight.0.lora_A" in trainable
+    assert "parametrizations.in_proj_weight.original" not in trainable
+
+
+def test_lora_targets_default_keeps_out_proj_only() -> None:
+    from src.wacv.config import ModelConfig
+
+    assert ModelConfig().lora_targets == ["out_proj"]
+    config = ModelConfig.model_validate(
+        {"lora_targets": ["out_proj", "in_proj", "mlp"]}
+    )
+    assert config.lora_targets == ["out_proj", "in_proj", "mlp"]

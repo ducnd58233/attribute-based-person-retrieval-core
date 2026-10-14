@@ -304,16 +304,19 @@ class AttributeDataset(Dataset):
         attribute_names: tuple[str, ...] | None = None,
         query_id_by_image: dict[str, int] | None = None,
     ) -> None:
-        self._gt = gt.reset_index(drop=True)
+        frame = gt.reset_index(drop=True)
         self._images_root = Path(images_root)
         self._transform = transform
         self._attribute_names = attribute_names or attribute_names_from_columns(
-            tuple(str(c) for c in self._gt.columns)
+            tuple(str(c) for c in frame.columns)
         )
+        # Plain arrays instead of a DataFrame: no pandas row lookup per item,
+        # and a cheaper pickle into each spawned DataLoader worker.
+        self._images = tuple(str(image) for image in frame["image"])
+        self._labels = frame[list(self._attribute_names)].to_numpy(dtype=np.float32)
         if query_id_by_image is not None:
             self._query_ids = [
-                int(query_id_by_image.get(str(row["image"]), -1))
-                for _, row in self._gt.iterrows()
+                int(query_id_by_image.get(image, -1)) for image in self._images
             ]
         else:
             self._query_ids = None
@@ -322,20 +325,22 @@ class AttributeDataset(Dataset):
     def attribute_names(self) -> tuple[str, ...]:
         return self._attribute_names
 
+    @property
+    def images(self) -> tuple[str, ...]:
+        """Image paths relative to the data root, in item order."""
+        return self._images
+
     def __len__(self) -> int:
-        return len(self._gt)
+        return len(self._images)
 
     def __getitem__(
         self, index: int
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, int]:
-        row = self._gt.iloc[index]
-        image = Image.open(self._images_root / row["image"]).convert("RGB")
+        image = Image.open(self._images_root / self._images[index]).convert("RGB")
         transformed = self._transform(image)
         if not isinstance(transformed, torch.Tensor):
             raise TypeError("AttributeDataset transforms must return a tensor")
-        attrs = torch.from_numpy(
-            row[list(self._attribute_names)].to_numpy(dtype=np.float32)
-        )
+        attrs = torch.tensor(self._labels[index])
         if self._query_ids is None:
             return transformed, attrs
         return transformed, attrs, self._query_ids[index]
@@ -362,7 +367,7 @@ def build_eval_loader(
         ),
         attribute_names=attribute_names,
     )
-    return build_loader(dataset, data_config, device, shuffle=False)
+    return build_loader(dataset, data_config, device, shuffle=False, train=False)
 
 
 def resolve_num_workers(requested: int) -> int:
@@ -373,20 +378,41 @@ def resolve_num_workers(requested: int) -> int:
     return min(requested, max(cpu_count - 1, 0))
 
 
+def seed_worker(worker_id: int) -> None:
+    """Seed numpy and ``random`` per worker from torch's per-worker seed.
+
+    Torch seeds itself per worker; numpy does not, so numpy-based augmentation
+    would otherwise start from an unseeded state in every spawned worker.
+    """
+    del worker_id
+    seed = torch.initial_seed() % 2**32
+    np.random.seed(seed)
+    random.seed(seed)
+
+
 def build_loader(
     dataset: Dataset,
     data_config: DataConfig,
     device: torch.device,
     *,
     shuffle: bool,
+    train: bool = True,
 ) -> DataLoader:
-    """DataLoader with the batch size and worker policy of ``data_config``."""
+    """DataLoader with the batch size and worker policy of ``data_config``.
+
+    ``train=False`` uses ``eval_batch_size`` (falls back to ``batch_size``).
+    """
     workers = resolve_num_workers(data_config.num_workers)
+    batch_size = data_config.batch_size
+    if not train and data_config.eval_batch_size is not None:
+        batch_size = data_config.eval_batch_size
     return DataLoader(
         dataset,
-        batch_size=data_config.batch_size,
+        batch_size=batch_size,
         shuffle=shuffle,
         num_workers=workers,
         pin_memory=device.type == "cuda",
         persistent_workers=workers > 0,
+        prefetch_factor=4 if workers > 0 else None,
+        worker_init_fn=seed_worker if workers > 0 else None,
     )
