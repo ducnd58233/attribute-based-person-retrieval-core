@@ -50,6 +50,20 @@ Market1501 / PA100K / PETA into `data/`.
 uv run python scripts/download-dataset.py
 ```
 
+### `scripts/download-hf-model.py`
+
+Download a Hugging Face model repo once into `runs/hf/models/<name>`
+(skipped if already complete). Loads `.env` at startup for Hub auth.
+
+```sh
+cp .env.example .env   # set HF_TOKEN=... (never commit); or use hf auth login
+uv run python scripts/download-hf-model.py google/embeddinggemma-300m --agree-gated-terms
+```
+
+Gated repos need a Hub licence accept plus `HF_TOKEN` in `.env` (or
+`HUGGING_FACE_HUB_TOKEN`, or interactive `hf auth login` as fallback) and
+`--agree-gated-terms`.
+
 ### `scripts/train.py`
 
 Train an attribute classifier from a validated experiment YAML.
@@ -180,7 +194,7 @@ google-colab-cli`; run it from WSL2 on Windows). See `AGENTS.md` "Remote GPU
 training" for the full walkthrough and the credential/security rules.
 
 ```sh
-cp .env.example .env   # fill in KAGGLE_USERNAME / KAGGLE_KEY, never commit
+cp .env.example .env   # fill in KAGGLE_* / HF_TOKEN as needed; never commit
 uv run python scripts/remote-training.py kaggle --config configs/convnext_baseline.yml
 uv run python scripts/remote-training.py colab  --config configs/convnext_baseline.yml --gpu T4
 ```
@@ -203,6 +217,13 @@ uv run python scripts/remote-training.py colab  --config configs/convnext_baseli
 | `--session` | no | `wacv-train` | `google-colab-cli` session name. |
 
 #### Credentials (one-time setup)
+
+**Hugging Face Hub** (gated models such as EmbeddingGemma): create a read
+token at https://huggingface.co/settings/tokens, accept the model licence
+on the repo page, and set `HF_TOKEN` in `.env` (see `.env.example`).
+`HUGGING_FACE_HUB_TOKEN` is an accepted alias. Interactive
+`hf auth login` / `huggingface-cli login` remains an optional fallback.
+`scripts/download-hf-model.py` loads `.env` automatically.
 
 **Kaggle:** go to https://www.kaggle.com/settings → "Create New Token" →
 downloads `kaggle.json` with your `username` and `key`. Either paste both

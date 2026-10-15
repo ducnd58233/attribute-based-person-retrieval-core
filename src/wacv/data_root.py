@@ -48,12 +48,37 @@ def discover_main_checkout_data(project_root: Path) -> Path | None:
     return None
 
 
+def discover_kaggle_input_data() -> Path | None:
+    """Return a Kaggle input tree that already holds organizer corpora.
+
+    Script kernels may mount datasets as ``/kaggle/input/<slug>`` or nested
+    ``/kaggle/input/datasets/<user>/<slug>``. Walk for ``annotations/`` and
+    accept the parent (or its parent) when all three corpora are present.
+    """
+    input_root = Path("/kaggle/input")
+    if not input_root.is_dir():
+        return None
+    seen: set[Path] = set()
+    for ann_dir in sorted(input_root.rglob("annotations")):
+        if not ann_dir.is_dir():
+            continue
+        for candidate in (ann_dir.parent, ann_dir.parent.parent):
+            resolved = candidate.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            if dataset_looks_present(candidate):
+                return candidate
+    return None
+
+
 def resolve_data_root(configured: Path, project_root: Path) -> Path:
     """Resolve ``data.root`` for shared worktree datasets.
 
     Order: ``WACV_DATA_ROOT`` env → absolute YAML path → local relative path
-    when the dataset is already there → sibling main checkout ``data/`` when
-    present → otherwise the local relative path (download target).
+    when the dataset is already there → Kaggle input corpora when present →
+    sibling main checkout ``data/`` when present → otherwise the local
+    relative path (download target).
 
     Prefer a junction/symlink named ``data`` in new worktrees (see AGENTS.md).
     """
@@ -65,6 +90,9 @@ def resolve_data_root(configured: Path, project_root: Path) -> Path:
     resolved = (project_root / configured).resolve()
     if dataset_looks_present(resolved):
         return resolved
+    kaggle = discover_kaggle_input_data()
+    if kaggle is not None:
+        return kaggle
     shared = discover_main_checkout_data(project_root)
     if shared is not None:
         return shared

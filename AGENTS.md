@@ -81,6 +81,18 @@ here.
   run `deployments/docker/docker-compose.yml`'s `submission-test` service
   against it. A dependency that works in the dev conda/uv environment but
   is missing from the zip fails silently until the real evaluation run.
+- **Submission package zip names (MUST):** name the durable zip for the
+  **experiment** (card id + short model/slug) in **snake_case**, matching
+  scored style already on disk — e.g. `e101_teacher_identity.zip`,
+  `e118_teacher_stronger_erasing.zip`, `e126_e107_e112_avg.zip`. Pass
+  `scripts/package-submission.py --out build/<experiment_slug>` so the
+  emitted zip is `build/<experiment_slug>.zip`, not the default
+  `build/submission.zip`. KEEP copies under `build/_KEEP_<…>/` use the
+  same experiment-named zip; never leave a durable KEEP artifact as
+  generic `submission.zip`. Align the slug with the parent workspace's
+  kebab-case record folder `<codabench-id>-<model-name>` when an ID
+  exists. Do not rename an already-scored B* zip (e.g.
+  `e101_teacher_identity.zip`).
 - **Never commit competition data.** Sample/dev copies of the datasets go
   under a gitignored `data/` (already in `.gitignore`); the real training
   data and hidden test set are never committed here, per the competition's
@@ -127,13 +139,24 @@ here.
   PETA) exist under the resolved root. Never delete or re-download the
   main worktree's `data/`.
 
-  **Before `git worktree remove` (MUST):** in that worktree only, remove
-  the `data` and `.venv` reparse points first (`rmdir data .venv` on
-  Windows CMD for junctions, or `unlink`/`rm` the symlinks — never
-  `rm -rf` through them). Then run `git worktree remove`. Leaving the
-  junctions in place lets worktree cleanup follow them and wipe the main
-  checkout's real `data/` / `.venv` (the incident that forced the
-  quarantine recovery).
+  **Before `git worktree remove` (MUST):**
+  1. **Keep models and zips in the main checkout first.** Move or copy
+     scored or keep-worthy checkpoints (`best.pt` / `last.pt` and any
+     package under `build/*.zip`) from this worktree into the main
+     checkout at
+     `attribute-based-person-retrieval-core/build/_KEEP_<id-or-run>/`
+     (example already on disk:
+     `build/_KEEP_969857_e101_teacher_identity/`). Do not leave the only
+     copy of a Codabench-scored or final-upload candidate inside a
+     disposable worktree. Parent-workspace lesson: the local **969857**
+     zip and E40 teacher checkpoint were deleted with their worktrees and
+     are no longer recoverable from disk.
+  2. In that worktree only, remove the `data` and `.venv` reparse points
+     (`rmdir data .venv` on Windows CMD for junctions, or `unlink`/`rm`
+     the symlinks — never `rm -rf` through them). Then run
+     `git worktree remove`. Leaving the junctions in place lets worktree
+     cleanup follow them and wipe the main checkout's real `data/` /
+     `.venv` (the incident that forced the quarantine recovery).
 - **Never commit trained model weights** to git history directly; use
   Git LFS, Hugging Face Hub, or another artifact store, and document
   wherever weights are pulled from in the model's own README.
@@ -234,10 +257,30 @@ here.
   `CUDA_VISIBLE_DEVICES=` (empty) for tests, smoke training, evaluation and
   packaging. Training on the only GPU belongs to the experiment lane; a smoke
   run that competes with it can OOM or slow a multi-hour run.
+- **Experiment training resume and checkpoints (MUST):** every experiment
+  train config must set `run.resume: true` (resolves to
+  `runs/<run.name>/checkpoints/last.pt`). `scripts/train.py` already writes
+  `last.pt` and `best.pt` each epoch via `CheckpointManager`; without
+  `resume: true`, a killed or interrupted run cannot continue, and a second
+  launch into an existing `runs/<name>/` raises `FileExistsError`. A first
+  start with no `last.pt` yet is fine (logs a warning and starts at epoch
+  0). Do not set `resume: false` or omit resume on multi-hour GPU
+  experiment trains. Bounded smoke configs (`configs/smoke.yml`) may leave
+  resume off.
+- **No new scripts without an explicit ask (MUST):** agents **MUST NOT**
+  create new scripts (under `scripts/`, one-off `*.py`/`*.sh` helpers,
+  scratch runners anywhere in this repo or its worktrees) unless the
+  human **explicitly** asked to create that script in the current
+  request. Prefer reusing existing scripts, CLI entrypoints
+  (`uv run python scripts/<existing>.py …`), or documented commands.
+  Updating an existing script the human named is OK when the task
+  requires it; creating a *new* file is not.
 - **No unrequested code (MUST):** only add files and logic the current task
-  acceptance criteria require. Prefer a script under `scripts/` over new
-  packages, fixtures, or README sections. Delete scaffolding that is not
-  needed for train / evaluate / package / submit.
+  acceptance criteria require. Prefer extending an existing script or
+  library module over new packages, fixtures, or README sections. Delete
+  scaffolding that is not needed for train / evaluate / package / submit.
+  Creating a *new* script still requires an explicit human ask (see the
+  bullet above).
 - **A well-known problem gets a well-known, uv-installable, cross-platform
   (Windows + Linux) library before it gets a hand-rolled reimplementation
   (MUST):** `src/wacv/remote/env.py`'s `load_dotenv` used to be a from-scratch
@@ -444,6 +487,15 @@ here.
   the key value, only ever `username` when falling back to the
   home-directory file *~/.kaggle/kaggle.json*.
 
+  **Hugging Face Hub (gated models, e.g. EmbeddingGemma):** put a
+  read token in `.env` as `HF_TOKEN` (see `.env.example`;
+  `HUGGING_FACE_HUB_TOKEN` is an accepted alias). Prefer that over
+  interactive `hf auth login` / `huggingface-cli login`, which remains an
+  optional fallback when neither env var is set.
+  `scripts/download-hf-model.py` loads `.env` the same way
+  `remote-training.py` does. Accept the model licence on the Hub page
+  before downloading; never commit tokens.
+
   **Colab with no human present (verified):** `colab`'s default
   `--auth adc` uses Google's Application Default Credentials. A human
   runs, once, on any machine with a browser (does not have to be the
@@ -534,10 +586,10 @@ here.
   rules.
 - Add code to `run.py`/the submission entry point that reaches the network
   at inference time.
-- Commit Kaggle/Colab credentials (`.env`, `kaggle.json`, `access_token`,
-  OAuth config) anywhere in this repo, or `git clone` this repo from inside
-  a Kaggle kernel or Colab VM (stage a self-contained folder instead —
-  `src/wacv/remote/stage.py`).
+- Commit Kaggle/Colab/Hugging Face credentials (`.env`, `kaggle.json`,
+  `access_token`, `HF_TOKEN`, OAuth config) anywhere in this repo, or
+  `git clone` this repo from inside a Kaggle kernel or Colab VM (stage a
+  self-contained folder instead — `src/wacv/remote/stage.py`).
 
 </delivery_gates>
 
@@ -564,6 +616,15 @@ do not copy it here.
   experiment's docs. Eval loaders do not keep persistent workers.
 - **A timing is a proxy only on an idle GPU.** Check `nvidia-smi` first;
   record a timing taken next to another job as contended, never as the proxy.
+  Proxy or conservative A10 estimates must not hard-block packaging or
+  submit advice by themselves; record them, and hard-block on time only
+  with hard Codabench evidence of an official-limit timeout kill. Parent
+  workspace counterexample: 3-view E103 (970882) was marked do-not-submit
+  on proxy timing yet scored exit 0 on Codabench (see parent
+  `records/ROUTER.md`, "Evaluator and package gate"). Whether a candidate
+  is **worth packaging / worth a slot** (local vs B*, final bar = beat B*
+  test mADM) is decided in the parent `AGENTS.md` ("Worth packaging /
+  worth a slot") and `records/ROUTER.md` — do not invent a second gate here.
 - **"No behaviour change" needs proof.** Keep the old implementation as a
   test oracle and compare outputs on real data.
 - **Assert in the test body,** not inside a helper, so a reader can see what
