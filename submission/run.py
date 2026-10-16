@@ -38,6 +38,15 @@ IMAGE_TRANSFORM = transforms.Compose(
 _STATE: dict[str, Any] = {"model": None, "device": None, "card": None}
 
 
+def _compute_dtype(card: dict[str, Any]) -> torch.dtype:
+    """Weight and input dtype for the forward; bf16 casts once at load."""
+    return (
+        torch.bfloat16
+        if str(card.get("compute_dtype", "fp32")) == "bf16"
+        else torch.float32
+    )
+
+
 def _image_transform_from_card(card: dict[str, Any]) -> transforms.Compose:
     size = card.get("image_size", [256, 128])
     if not isinstance(size, list) or len(size) != 2:
@@ -222,7 +231,8 @@ def _cuda_forward_works(model: nn.Module, card: dict[str, Any]) -> bool:
         return False
     height, width = _image_hw_from_card(card)
     try:
-        probe = torch.zeros(1, 3, height, width, device="cuda")
+        dtype = next(model.parameters()).dtype
+        probe = torch.zeros(1, 3, height, width, device="cuda", dtype=dtype)
         with torch.inference_mode():
             model(probe)
         torch.cuda.synchronize()
@@ -239,24 +249,27 @@ def load_model() -> None:
         card = json.load(handle)
     prefer_cuda = torch.cuda.is_available()
     load_device = torch.device("cuda" if prefer_cuda else "cpu")
+    compute_dtype = _compute_dtype(card) if prefer_cuda else torch.float32
     if str(card.get("weight_format", "state_dict")) == "torchscript":
         model = torch.jit.load(WEIGHTS_PATH, map_location=load_device)
-        if str(card.get("weight_dtype", "fp32")) == "fp16":
-            # Stored half to halve the zip; compute stays fp32 (or card autocast).
-            model.float()
+        # Stored half to halve the zip; compute runs in compute_dtype
+        # (fp32 by default, with the card's autocast on top).
+        model.to(compute_dtype)
     else:
         model = _build_model(card)
         state = torch.load(WEIGHTS_PATH, map_location=load_device, weights_only=True)
         model.load_state_dict(state)
-        model.to(load_device)
+        model.to(device=load_device, dtype=compute_dtype)
     model.eval()
     device = load_device
     if prefer_cuda and not _cuda_forward_works(model, card):
-        model = model.to(torch.device("cpu"))
+        model = model.to(device=torch.device("cpu"), dtype=torch.float32)
         device = torch.device("cpu")
+        compute_dtype = torch.float32
     _STATE["model"] = model
     _STATE["device"] = device
     _STATE["card"] = card
+    _STATE["dtype"] = compute_dtype
     _STATE["transform"] = _image_transform_from_card(card)
 
 
@@ -271,7 +284,11 @@ def _load_gallery_image(
 
 
 def _iter_gallery_tensors(
-    gallery: list[dict[str, Any]], device: torch.device, *, decode_workers: int = 0
+    gallery: list[dict[str, Any]],
+    device: torch.device,
+    *,
+    decode_workers: int = 0,
+    dtype: torch.dtype = torch.float32,
 ) -> Any:
     """Yield image batches in gallery order.
 
@@ -301,7 +318,9 @@ def _iter_gallery_tensors(
                 if start + BATCH_SIZE < total:
                     next_batch = submit_batch(start + BATCH_SIZE)
                 tensors = [future.result() for future in current_batch]
-            images = torch.stack(tensors, dim=0).to(device, non_blocking=True)
+            images = torch.stack(tensors, dim=0).to(
+                device=device, dtype=dtype, non_blocking=True
+            )
             done = min(start + BATCH_SIZE, total)
             print(f"[rank_gallery] {done}/{total} gallery images processed", flush=True)
             yield images
@@ -365,7 +384,10 @@ def _predict_gallery(
     feature_batches: list[np.ndarray] = []
     with torch.inference_mode(), _autocast(device, card):
         for images in _iter_gallery_tensors(
-            gallery, device, decode_workers=int(card.get("inference_decode_workers", 0))
+            gallery,
+            device,
+            decode_workers=int(card.get("inference_decode_workers", 0)),
+            dtype=_STATE.get("dtype", torch.float32),
         ):
             probs_sum: torch.Tensor | None = None
             for view in tta_views:

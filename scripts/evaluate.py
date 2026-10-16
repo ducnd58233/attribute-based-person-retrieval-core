@@ -75,6 +75,20 @@ def parse_args() -> argparse.Namespace:
         default=0.5,
         help="weight on the primary model probabilities; the rest goes to the partner",
     )
+    parser.add_argument(
+        "--save-probabilities",
+        type=Path,
+        default=None,
+        help="also write identity gallery probabilities to <dir>/<protocol>.npy",
+    )
+    parser.add_argument(
+        "--from-probabilities",
+        type=Path,
+        nargs="+",
+        default=None,
+        help="score the equal-weight mean of cached <dir>/<protocol>.npy files; "
+        "no model is loaded",
+    )
     return parser.parse_args()
 
 
@@ -124,6 +138,87 @@ def _evaluate_protocol(
     return _protocol_metrics_keys(metrics, time.perf_counter() - started)
 
 
+def _cache_protocol(
+    *,
+    config: ExperimentConfig,
+    model: torch.nn.Module,
+    device: torch.device,
+    ground_truth: pd.DataFrame,
+    queries: np.ndarray,
+    attribute_names: tuple[str, ...],
+    probabilities_path: Path,
+) -> dict[str, float]:
+    from src.wacv.data import build_eval_loader
+    from src.wacv.evaluation import (
+        RankingEvalData,
+        predict_probabilities,
+        ranking_metrics_from_probabilities,
+    )
+
+    loader = build_eval_loader(
+        ground_truth, attribute_names, config.model.name, config.data, device
+    )
+    started = time.perf_counter()
+    probabilities = predict_probabilities(
+        model,
+        loader,
+        device,
+        progress=config.run.progress,
+        amp=config.inference.amp,
+    )
+    probabilities_path.parent.mkdir(parents=True, exist_ok=True)
+    np.save(probabilities_path, probabilities.astype(np.float32))
+    data = RankingEvalData(
+        queries=queries,
+        gallery_attrs=ground_truth[list(attribute_names)].to_numpy(dtype=np.int64),
+        gallery_loader=(),
+    )
+    metrics = ranking_metrics_from_probabilities(probabilities, data, config.ranking)
+    return _protocol_metrics_keys(metrics, time.perf_counter() - started)
+
+
+def _require_probability_ranking(config: ExperimentConfig) -> None:
+    from src.wacv.evaluation import can_rank_from_probabilities
+
+    if not can_rank_from_probabilities(config.ranking, config.inference):
+        raise ValueError("cached probabilities need identity TTA, no smoothing")
+    if config.ranking.calibration != "none":
+        raise ValueError("cached probabilities do not refit calibration")
+
+
+def score_cached_probabilities(
+    config_path: Path,
+    cache_dirs: list[Path],
+    *,
+    protocols: tuple[EvalProtocol, ...],
+) -> dict[str, dict[str, float]]:
+    """Score the equal-weight mean of cached member probabilities per protocol."""
+    from src.wacv.config import load_config
+    from src.wacv.evaluation import RankingEvalData, ranking_metrics_from_probabilities
+
+    config = load_config(config_path)
+    _require_probability_ranking(config)
+    results: dict[str, dict[str, float]] = {}
+    for protocol in protocols:
+        ground_truth, queries, names = _prepare_protocol_data(config, protocol)
+        started = time.perf_counter()
+        members = [np.load(cache / f"{protocol}.npy") for cache in cache_dirs]
+        if any(member.shape != members[0].shape for member in members):
+            raise ValueError(f"cached {protocol} probabilities differ in shape")
+        data = RankingEvalData(
+            queries=queries,
+            gallery_attrs=ground_truth[list(names)].to_numpy(dtype=np.int64),
+            gallery_loader=(),
+        )
+        metrics = ranking_metrics_from_probabilities(
+            np.mean(members, axis=0), data, config.ranking
+        )
+        results[protocol] = _protocol_metrics_keys(
+            metrics, time.perf_counter() - started
+        )
+    return results
+
+
 def _prepare_protocol_data(
     config: ExperimentConfig,
     protocol: EvalProtocol,
@@ -161,6 +256,7 @@ def evaluate_checkpoint(
     ensemble_config_path: Path | None = None,
     ensemble_checkpoint: Path | None = None,
     ensemble_weight: float = 0.5,
+    probabilities_out: Path | None = None,
 ) -> tuple[dict[str, dict[str, float]], ExperimentConfig]:
     from src.wacv.config import load_config
     from src.wacv.engine import resolve_device
@@ -169,6 +265,8 @@ def evaluate_checkpoint(
     config = load_config(config_path)
     device = resolve_device(config.run.device)
     distance_name = distance or config.ranking.distance
+    if probabilities_out is not None:
+        _require_probability_ranking(config)
 
     _, _, attribute_names = _prepare_protocol_data(config, protocols[0])
     model = _load_eval_model(config, checkpoint, len(attribute_names), device)
@@ -192,6 +290,17 @@ def evaluate_checkpoint(
     run_dir = config.run.output_dir / config.run.name
     for protocol in protocols:
         ground_truth, queries, names = _prepare_protocol_data(config, protocol)
+        if probabilities_out is not None:
+            results[protocol] = _cache_protocol(
+                config=config,
+                model=model,
+                device=device,
+                ground_truth=ground_truth,
+                queries=queries,
+                attribute_names=names,
+                probabilities_path=probabilities_out / f"{protocol}.npy",
+            )
+            continue
         calibration_path = None
         if config.ranking.calibration == "per_attribute":
             calibration_path = run_dir / f"calibration_{protocol}.json"
@@ -247,12 +356,18 @@ def main() -> None:
 
     configure_default_logging()
     args = parse_args()
+    protocols: tuple[EvalProtocol, ...] = (
+        ("id_val", "lodo_m") if args.protocol == "both" else (args.protocol,)
+    )
+    if args.from_probabilities is not None:
+        cached = score_cached_probabilities(
+            args.config, args.from_probabilities, protocols=protocols
+        )
+        print(json.dumps(cached, indent=2, sort_keys=True))
+        return
     config = load_config(args.config)
     checkpoint = args.checkpoint or (
         config.run.output_dir / config.run.name / "checkpoints" / "best.pt"
-    )
-    protocols: tuple[EvalProtocol, ...] = (
-        ("id_val", "lodo_m") if args.protocol == "both" else (args.protocol,)
     )
 
     results, config = evaluate_checkpoint(
@@ -263,6 +378,7 @@ def main() -> None:
         ensemble_config_path=args.ensemble_config,
         ensemble_checkpoint=args.ensemble_checkpoint,
         ensemble_weight=args.ensemble_weight,
+        probabilities_out=args.save_probabilities,
     )
     serialized = json.dumps(results, indent=2, sort_keys=True) + "\n"
     run_dir = config.run.output_dir / config.run.name

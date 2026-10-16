@@ -86,6 +86,12 @@ def parse_args() -> argparse.Namespace:
         help="inference_amp in model_card.json (CUDA autocast at inference)",
     )
     parser.add_argument(
+        "--compute-dtype",
+        choices=("fp32", "bf16"),
+        default="fp32",
+        help="compute_dtype in model_card.json: bf16 casts weights once at load",
+    )
+    parser.add_argument(
         "--config",
         type=Path,
         default=DEFAULT_CONFIG_PATH,
@@ -308,6 +314,7 @@ def main() -> None:
         _convert_torchscript_to_fp16(assets / "model.pt", card)
     card["inference_decode_workers"] = int(args.decode_workers)
     card["inference_amp"] = str(args.amp)
+    card["compute_dtype"] = str(args.compute_dtype)
     if card["neighbour_smooth"] is not None and "identity" not in card["inference_tta"]:
         raise ValueError("neighbour_smooth takes its features from the identity view")
     (assets / "model_card.json").write_text(
