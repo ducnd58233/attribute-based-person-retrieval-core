@@ -273,7 +273,7 @@ def _run_linear_probe_stage(
 
 
 def _maybe_text_anchor_init(
-    model: ClipAttributeClassifier | Dinov2AttributeClassifier,
+    model: torch.nn.Module,
     config: ExperimentConfig,
     device: torch.device,
 ) -> None:
