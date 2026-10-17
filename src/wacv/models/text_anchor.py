@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
+from typing import Any, cast
 
 import open_clip
 import torch
@@ -66,10 +67,12 @@ def init_clip_head_from_text(
 
     positives = [_prompt_pair(name)[0] for name in attribute_names]
     negatives = [_prompt_pair(name)[1] for name in attribute_names]
-    text_model, _, _ = open_clip.create_model_and_transforms(arch, pretrained="openai")
+    created, _, _ = open_clip.create_model_and_transforms(arch, pretrained="openai")
     tokenizer = open_clip.get_tokenizer(arch)
     text_device = device or next(classifier.parameters()).device
-    text_model = text_model.to(text_device)
+    # open_clip models are dynamically typed; encode_text and logit_scale are
+    # not in the nn.Module stubs, so the checker sees them as Tensors.
+    text_model = cast(Any, created.to(text_device))
     text_model.eval()
     with torch.inference_mode():
         pos = text_model.encode_text(tokenizer(positives).to(text_device))
