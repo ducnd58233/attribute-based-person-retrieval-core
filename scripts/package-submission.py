@@ -78,6 +78,17 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--member-weight",
+        type=float,
+        action="append",
+        default=[],
+        metavar="W",
+        help=(
+            "Averaging weight of each --from-member-dir, in the same order "
+            "(repeat once per directory; normalised to sum 1). Default: equal."
+        ),
+    )
+    parser.add_argument(
         "--decode-workers",
         type=int,
         default=0,
@@ -271,6 +282,21 @@ def _copy_or_link(source: Path, destination: Path) -> None:
         shutil.copy2(source, destination)
 
 
+def _resolve_member_weights(count: int, requested: list[float]) -> list[float]:
+    """Normalised averaging weights: equal when none are given."""
+    if not requested:
+        return [1.0 / count] * count
+    if len(requested) != count:
+        raise ValueError(
+            f"--member-weight needs one value per --from-member-dir ({count}), "
+            f"got {len(requested)}"
+        )
+    if any(weight <= 0.0 for weight in requested):
+        raise ValueError("--member-weight values must be positive")
+    total = sum(requested)
+    return [weight / total for weight in requested]
+
+
 def _assemble_from_member_dirs(
     member_dirs: list[Path],
     assets_dir: Path,
@@ -278,13 +304,14 @@ def _assemble_from_member_dirs(
     tta: list[str] | None,
     decode_workers: int,
     amp: str,
+    member_weights: list[float] | None = None,
 ) -> dict[str, Any]:
     """Build a multi-TorchScript package with per-member preprocess fields."""
     if len(member_dirs) < 2:
         raise ValueError("--from-member-dir needs at least two directories")
     members: list[dict[str, Any]] = []
     ranking_source: dict[str, Any] | None = None
-    equal_weight = 1.0 / len(member_dirs)
+    weights = _resolve_member_weights(len(member_dirs), member_weights or [])
     for index, member_dir in enumerate(member_dirs):
         weights_path, card_path = _resolve_member_dir_assets(member_dir)
         source_card = json.loads(card_path.read_text(encoding="utf-8"))
@@ -317,7 +344,7 @@ def _assemble_from_member_dirs(
                 "image_size": list(source_card["image_size"]),
                 "image_mean": list(source_card["image_mean"]),
                 "image_std": list(source_card["image_std"]),
-                "weight": equal_weight,
+                "weight": weights[index],
                 "weight_format": "torchscript",
                 "weight_dtype": str(source_card.get("weight_dtype", "fp32")),
                 "inference_tta": member_tta,
@@ -398,6 +425,8 @@ def _check_package_inputs(args: argparse.Namespace, *, use_member_dirs: bool) ->
             )
     elif args.checkpoint is None:
         raise ValueError("provide --checkpoint or at least two --from-member-dir")
+    if args.member_weight and not use_member_dirs:
+        raise ValueError("--member-weight only applies to --from-member-dir")
 
 
 def _export_checkpoint_package(
@@ -466,6 +495,7 @@ def main() -> None:
             tta=[str(view) for view in args.tta] if args.tta is not None else None,
             decode_workers=int(args.decode_workers),
             amp=str(args.amp),
+            member_weights=[float(weight) for weight in args.member_weight],
         )
     else:
         card = _export_checkpoint_package(args, assets)
