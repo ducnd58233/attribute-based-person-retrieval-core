@@ -60,6 +60,71 @@ class RandomJpegCompression:
         return Image.open(buffer).convert("RGB")
 
 
+# T28 / E81: fixed V-deg severities (organizer val only; no hue ops).
+VAL_DEGRADE_LEVELS: dict[str, dict[str, float | int]] = {
+    "L1": {"downscale": 0.60, "blur_sigma": 0.6, "jpeg_quality": 75},
+    "L2": {"downscale": 0.40, "blur_sigma": 1.0, "jpeg_quality": 55},
+    "L3": {"downscale": 0.28, "blur_sigma": 1.4, "jpeg_quality": 35},
+}
+
+
+class FixedDownscaleUpsample:
+    """Deterministic shrink-then-restore (fixed scale)."""
+
+    def __init__(self, scale: float) -> None:
+        if not (0.0 < scale <= 1.0):
+            raise ValueError(f"scale must be in (0, 1], got {scale}")
+        self._scale = float(scale)
+
+    def __call__(self, image: Image.Image) -> Image.Image:
+        width, height = image.size
+        small_w = max(1, int(width * self._scale))
+        small_h = max(1, int(height * self._scale))
+        reduced = image.resize((small_w, small_h), Image.Resampling.BILINEAR)
+        return reduced.resize((width, height), Image.Resampling.BILINEAR)
+
+
+class FixedJpegCompression:
+    """Deterministic JPEG re-encode at a fixed quality."""
+
+    def __init__(self, quality: int) -> None:
+        if not (1 <= int(quality) <= 100):
+            raise ValueError(f"jpeg quality must be 1..100, got {quality}")
+        self._quality = int(quality)
+
+    def __call__(self, image: Image.Image) -> Image.Image:
+        buffer = BytesIO()
+        image.save(buffer, format="JPEG", quality=self._quality)
+        buffer.seek(0)
+        return Image.open(buffer).convert("RGB")
+
+
+def val_degrade_transform(
+    size: tuple[int, int],
+    level: str,
+    *,
+    mean: Sequence[float],
+    std: Sequence[float],
+) -> transforms.Compose:
+    """Eval transform with fixed V-deg severity (no hue/saturation ops)."""
+    if level not in VAL_DEGRADE_LEVELS:
+        raise ValueError(f"Unknown val degrade level {level!r}; expected L1/L2/L3")
+    spec = VAL_DEGRADE_LEVELS[level]
+    scale = float(spec["downscale"])
+    blur_sigma = float(spec["blur_sigma"])
+    jpeg_q = int(spec["jpeg_quality"])
+    return transforms.Compose(
+        [
+            transforms.Resize(size),
+            FixedDownscaleUpsample(scale),
+            transforms.GaussianBlur(kernel_size=3, sigma=(blur_sigma, blur_sigma)),
+            FixedJpegCompression(jpeg_q),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=list(mean), std=list(std)),
+        ]
+    )
+
+
 def _eval_transform(
     size: tuple[int, int], stats: NormalizationStats
 ) -> transforms.Compose:
@@ -125,10 +190,17 @@ def transforms_for_model(
     train: bool,
     image_size: tuple[int, int] = DEFAULT_IMAGE_SIZE,
     degrade_aug: DegradeAugConfig | None = None,
+    val_degrade: str | None = None,
 ) -> transforms.Compose:
     """Pick the model family's preprocessing at ``image_size`` (H, W)."""
     stats = normalization_for_model(model_name)
+    if val_degrade is not None and train:
+        raise ValueError("val_degrade is eval-only; refuse train=True")
     if not train:
+        if val_degrade is not None:
+            return val_degrade_transform(
+                image_size, val_degrade, mean=stats.mean, std=stats.std
+            )
         return _eval_transform(image_size, stats)
     if degrade_aug is not None and degrade_aug.enabled:
         return _train_transform_degrade(image_size, degrade_aug, stats)
@@ -232,16 +304,19 @@ class AttributeDataset(Dataset):
         attribute_names: tuple[str, ...] | None = None,
         query_id_by_image: dict[str, int] | None = None,
     ) -> None:
-        self._gt = gt.reset_index(drop=True)
+        frame = gt.reset_index(drop=True)
         self._images_root = Path(images_root)
         self._transform = transform
         self._attribute_names = attribute_names or attribute_names_from_columns(
-            tuple(str(c) for c in self._gt.columns)
+            tuple(str(c) for c in frame.columns)
         )
+        # Plain arrays instead of a DataFrame: no pandas row lookup per item,
+        # and a cheaper pickle into each spawned DataLoader worker.
+        self._images = tuple(str(image) for image in frame["image"])
+        self._labels = frame[list(self._attribute_names)].to_numpy(dtype=np.float32)
         if query_id_by_image is not None:
             self._query_ids = [
-                int(query_id_by_image.get(str(row["image"]), -1))
-                for _, row in self._gt.iterrows()
+                int(query_id_by_image.get(image, -1)) for image in self._images
             ]
         else:
             self._query_ids = None
@@ -250,23 +325,49 @@ class AttributeDataset(Dataset):
     def attribute_names(self) -> tuple[str, ...]:
         return self._attribute_names
 
+    @property
+    def images(self) -> tuple[str, ...]:
+        """Image paths relative to the data root, in item order."""
+        return self._images
+
     def __len__(self) -> int:
-        return len(self._gt)
+        return len(self._images)
 
     def __getitem__(
         self, index: int
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, int]:
-        row = self._gt.iloc[index]
-        image = Image.open(self._images_root / row["image"]).convert("RGB")
+        image = Image.open(self._images_root / self._images[index]).convert("RGB")
         transformed = self._transform(image)
         if not isinstance(transformed, torch.Tensor):
             raise TypeError("AttributeDataset transforms must return a tensor")
-        attrs = torch.from_numpy(
-            row[list(self._attribute_names)].to_numpy(dtype=np.float32)
-        )
+        attrs = torch.tensor(self._labels[index])
         if self._query_ids is None:
             return transformed, attrs
         return transformed, attrs, self._query_ids[index]
+
+
+def build_eval_loader(
+    gt: pd.DataFrame,
+    attribute_names: tuple[str, ...],
+    model_name: str,
+    data_config: DataConfig,
+    device: torch.device,
+    *,
+    val_degrade: str | None = None,
+) -> DataLoader:
+    """Un-shuffled eval loader over ``gt`` with the model family's eval transform."""
+    dataset = AttributeDataset(
+        gt,
+        data_config.root,
+        transforms_for_model(
+            model_name,
+            train=False,
+            image_size=data_config.image_size,
+            val_degrade=val_degrade,
+        ),
+        attribute_names=attribute_names,
+    )
+    return build_loader(dataset, data_config, device, training=False)
 
 
 def resolve_num_workers(requested: int) -> int:
@@ -282,15 +383,22 @@ def build_loader(
     data_config: DataConfig,
     device: torch.device,
     *,
-    shuffle: bool,
+    training: bool,
 ) -> DataLoader:
-    """DataLoader with the batch size and worker policy of ``data_config``."""
+    """DataLoader for training (shuffled) or evaluation (in order).
+
+    Training uses ``batch_size`` and keeps its workers alive across epochs.
+    Evaluation uses the larger ``eval_batch_size`` and lets its workers exit
+    after each pass, so a val loader does not hold a second set of worker
+    processes in memory for the whole run. Torch seeds ``random``, numpy and
+    torch in every worker itself.
+    """
     workers = resolve_num_workers(data_config.num_workers)
     return DataLoader(
         dataset,
-        batch_size=data_config.batch_size,
-        shuffle=shuffle,
+        batch_size=data_config.batch_size if training else data_config.eval_batch_size,
+        shuffle=training,
         num_workers=workers,
         pin_memory=device.type == "cuda",
-        persistent_workers=workers > 0,
+        persistent_workers=training and workers > 0,
     )

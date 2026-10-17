@@ -29,14 +29,15 @@ duplicated here; link to them instead.
 Two environments exist here, deliberately different:
 
 - **Dev/training** (`environment.yml` + `pyproject.toml`, this repo's root):
-  Python 3.13, CUDA 13.0, torch built against cu130 — whatever is fastest
-  for training on your own hardware. Nothing here has to match the
-  competition's runtime.
+  whatever Python, CUDA and torch versions are fastest for training on your
+  own hardware; the pinned versions are in those two files. Nothing here has
+  to match the competition's runtime.
 - **Submission/evaluation** (`deployments/docker/`): a local mirror of the
-  organizers' exact evaluation container
-  (`pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime`, Python 3.11, torch
-  2.4.1). Only code and weights inside the submission zip run here — no
-  network access, everything the model needs must be vendored into the zip.
+  organizers' exact evaluation container; the image is pinned in
+  `deployments/docker/Dockerfile` and must match the parent workspace's
+  `PROBLEM-DETAILS.md`. Only code and weights inside the submission zip run
+  here — no network access, everything the model needs must be vendored
+  into the zip.
 
 Do not let the two blend: a dependency added to `pyproject.toml` for
 training does not exist in the evaluation container unless it is also
@@ -80,29 +81,48 @@ here.
   run `deployments/docker/docker-compose.yml`'s `submission-test` service
   against it. A dependency that works in the dev conda/uv environment but
   is missing from the zip fails silently until the real evaluation run.
+- **Submission package zip names (MUST):** name the durable zip for the
+  **experiment** (card id + short model/slug) in **snake_case**, matching
+  scored style already on disk — e.g. `e101_teacher_identity.zip`,
+  `e118_teacher_stronger_erasing.zip`, `e126_e107_e112_avg.zip`. Pass
+  `scripts/package-submission.py --out build/<experiment_slug>` so the
+  emitted zip is `build/<experiment_slug>.zip`, not the default
+  `build/submission.zip`. KEEP copies under `build/_KEEP_<…>/` use the
+  same experiment-named zip; never leave a durable KEEP artifact as
+  generic `submission.zip`. Align the slug with the parent workspace's
+  kebab-case record folder `<codabench-id>-<model-name>` when an ID
+  exists. Do not rename an already-scored B* zip (e.g.
+  `e101_teacher_identity.zip`).
 - **Never commit competition data.** Sample/dev copies of the datasets go
   under a gitignored `data/` (already in `.gitignore`); the real training
   data and hidden test set are never committed here, per the competition's
   licence terms in the parent workspace's `PROBLEM-DETAILS.md`.
-- **Experiment worktrees: shared data root (MUST):** every `git worktree`
-  for an experiment (`…-core-e34`, `…-core-e60`, …) **must** reuse the
-  main checkout's organizer dataset — **no second `scripts/download-dataset.py`
-  run and no duplicated `data/` trees**. Default YAML `data.root: data` is
-  relative to that worktree, which is why naive downloads fill the disk.
+- **Experiment worktrees: share `data/` and `.venv` (MUST):** every
+  `git worktree` for an experiment (`attribute-based-person-retrieval-core-<id>`) **must
+  not copy** `data/` or `.venv`. Link both to the main checkout
+  `attribute-based-person-retrieval-core/` — **no second
+  `scripts/download-dataset.py` run, no duplicated dataset trees, no
+  second venv install**. Default YAML `data.root: data` is relative to
+  that worktree, which is why naive downloads fill the disk. Parent-workspace
+  `_KEEP_data_duplicates_DO_NOT_DELETE/` is temporary recovery after a
+  Windows junction wipe, not the desired policy; do not create new
+  duplicates.
 
-  Prefer a junction/symlink in the new worktree (do this immediately after
-  `git worktree add`, before any train/download):
+  Immediately after `git worktree add`, before any train/download (Windows:
+  prefer junction/`mklink /J`; Git Bash/WSL: symlink):
 
   ```sh
   # from the new worktree root; MAIN is the primary core checkout
   MAIN="../attribute-based-person-retrieval-core"
   # Git Bash / WSL:
   ln -sfn "$(cd "$MAIN" && pwd)/data" data
+  ln -sfn "$(cd "$MAIN" && pwd)/.venv" .venv
   # Windows CMD (admin not required for /J):
   # mklink /J data ..\attribute-based-person-retrieval-core\data
+  # mklink /J .venv ..\attribute-based-person-retrieval-core\.venv
   ```
 
-  Or set an absolute override (also honored by `load_config` and
+  Or set an absolute data override (also honored by `load_config` and
   `scripts/download-dataset.py`; may live in `.env` — see `.env.example`):
 
   ```sh
@@ -113,10 +133,30 @@ here.
   `resolve_data_root` / `download-dataset.py` automatically fall back to
   sibling `../attribute-based-person-retrieval-core/data` when that tree
   already looks complete — so a fresh worktree must not re-download.
-  Still create the junction/symlink so tools that assume `./data` keep
-  working. `download-dataset.py` skips only when annotations **and** all
-  three corpora (Market1501, PA100k, PETA) exist under the resolved root.
-  Never delete the main worktree's `data/`.
+  Still create the `data` and `.venv` junctions/symlinks so tools that
+  assume `./data` / `./.venv` keep working. `download-dataset.py` skips
+  only when annotations **and** all three corpora (Market1501, PA100k,
+  PETA) exist under the resolved root. Never delete or re-download the
+  main worktree's `data/`.
+
+  **Before `git worktree remove` (MUST):**
+  1. **Keep models and zips in the main checkout first.** Move or copy
+     scored or keep-worthy checkpoints (`best.pt` / `last.pt` and any
+     package under `build/*.zip`) from this worktree into the main
+     checkout at
+     `attribute-based-person-retrieval-core/build/_KEEP_<id-or-run>/`
+     (example already on disk:
+     `build/_KEEP_969857_e101_teacher_identity/`). Do not leave the only
+     copy of a Codabench-scored or final-upload candidate inside a
+     disposable worktree. Parent-workspace lesson: the local **969857**
+     zip and E40 teacher checkpoint were deleted with their worktrees and
+     are no longer recoverable from disk.
+  2. In that worktree only, remove the `data` and `.venv` reparse points
+     (`rmdir data .venv` on Windows CMD for junctions, or `unlink`/`rm`
+     the symlinks — never `rm -rf` through them). Then run
+     `git worktree remove`. Leaving the junctions in place lets worktree
+     cleanup follow them and wipe the main checkout's real `data/` /
+     `.venv` (the incident that forced the quarantine recovery).
 - **Never commit trained model weights** to git history directly; use
   Git LFS, Hugging Face Hub, or another artifact store, and document
   wherever weights are pulled from in the model's own README.
@@ -197,8 +237,8 @@ here.
   test; only reading `git diff` caught it. Match the exact token, never a
   substring, and read the result.
 - **Fix type errors in code, with these patterns (MUST):** no suppression
-  comment is ever the answer (see above). What worked for the 59 pyright
-  errors: `module.get_submodule("a.b")`, `get_parameter` and
+  comment is ever the answer (see above). What worked in past type-error
+  cleanups: `module.get_submodule("a.b")`, `get_parameter` and
   `register_parameter` for dynamic `nn.Module` attributes (they carry a real
   runtime check); `isinstance` narrowing at the call site instead of a `bool`
   helper; a runtime-checkable `Protocol` instead of
@@ -217,10 +257,30 @@ here.
   `CUDA_VISIBLE_DEVICES=` (empty) for tests, smoke training, evaluation and
   packaging. Training on the only GPU belongs to the experiment lane; a smoke
   run that competes with it can OOM or slow a multi-hour run.
+- **Experiment training resume and checkpoints (MUST):** every experiment
+  train config must set `run.resume: true` (resolves to
+  `runs/<run.name>/checkpoints/last.pt`). `scripts/train.py` already writes
+  `last.pt` and `best.pt` each epoch via `CheckpointManager`; without
+  `resume: true`, a killed or interrupted run cannot continue, and a second
+  launch into an existing `runs/<name>/` raises `FileExistsError`. A first
+  start with no `last.pt` yet is fine (logs a warning and starts at epoch
+  0). Do not set `resume: false` or omit resume on multi-hour GPU
+  experiment trains. Bounded smoke configs (`configs/smoke.yml`) may leave
+  resume off.
+- **No new scripts without an explicit ask (MUST):** agents **MUST NOT**
+  create new scripts (under `scripts/`, one-off `*.py`/`*.sh` helpers,
+  scratch runners anywhere in this repo or its worktrees) unless the
+  human **explicitly** asked to create that script in the current
+  request. Prefer reusing existing scripts, CLI entrypoints
+  (`uv run python scripts/<existing>.py …`), or documented commands.
+  Updating an existing script the human named is OK when the task
+  requires it; creating a *new* file is not.
 - **No unrequested code (MUST):** only add files and logic the current task
-  acceptance criteria require. Prefer a script under `scripts/` over new
-  packages, fixtures, or README sections. Delete scaffolding that is not
-  needed for train / evaluate / package / submit.
+  acceptance criteria require. Prefer extending an existing script or
+  library module over new packages, fixtures, or README sections. Delete
+  scaffolding that is not needed for train / evaluate / package / submit.
+  Creating a *new* script still requires an explicit human ask (see the
+  bullet above).
 - **A well-known problem gets a well-known, uv-installable, cross-platform
   (Windows + Linux) library before it gets a hand-rolled reimplementation
   (MUST):** `src/wacv/remote/env.py`'s `load_dotenv` used to be a from-scratch
@@ -265,16 +325,12 @@ here.
   (no `src.wacv` import - it ships standalone into the sandboxed Codabench
   eval image, see the file's own docstring), so every prediction/ranking
   function it reimplements has to copy the library's numeric behavior
-  exactly, not re-derive it. Codabench submission 948099 failed exactly
-  this way: `submission/run.py`'s `_dual_softmax_rerank` allocated the
-  full Q×G distance matrix as **float64** (~6.5GB peak on a real
-  ~3462×33407 gallery) after `src/wacv/evaluation/__init__.py`'s own
-  `dual_softmax_rerank` had already moved to a chunked **float32**
-  version - the submission template simply lagged. Codabench's ingestion
-  worker OOM-killed the child process with an opaque platform message
-  ("non-zero return code"), not a Python traceback, so nothing pointed at
-  the actual line; `pytest` and Docker's `load_model`/small-gallery smoke
-  both passed, since neither exercises a gallery large enough to OOM.
+  exactly, not re-derive it. A submission has already failed this way: the
+  `run.py` copy of a ranking function kept a full-size float64 matrix after
+  the library copy had moved to chunked float32, and Codabench OOM-killed it
+  with an opaque platform message, not a Python traceback, while `pytest`
+  and the small-gallery Docker smoke both passed (details:
+  parent workspace `records/ROUTER.md`, "Submission incidents").
   After touching any submission-side reimplementation of library math,
   run (or add, if the function is new) a parity test like
   `tests/test_dual_softmax.py`'s
@@ -288,14 +344,10 @@ here.
   footprint rather than a formula.
 - **A memory fix for a ranking function is not done until the whole
   ranking stage is profiled at real gallery scale, not just the one
-  function that was touched (MUST):** Codabench submission 948099 was
-  "fixed" by making `_dual_softmax_rerank` chunked float32 (see the
-  dtype-mirroring rule above); the very next submission (948604), same
-  zip pattern, failed with the identical opaque error. Profiling the
-  *whole* ranking stage at the real E17 shape (Q=3462, G=33407) - not
-  just the function that was already suspected - found the actual
-  remaining peak was in `_hybrid_distance`/`_minmax_per_query`, never
-  touched by the first fix. After any change meant to fix or bound a
+  function that was touched (MUST):** fixing only the suspected function
+  once left the real peak elsewhere in the ranking stage, and the next
+  upload failed with the same opaque error (parent workspace
+  `records/ROUTER.md`, "Submission incidents"). After any change meant to fix or bound a
   submission-side OOM, profile peak RSS across the full call it sits
   inside (`rank_gallery`, not just the one function), at the real
   gallery/query counts recorded in this submission's own
@@ -305,15 +357,15 @@ here.
   naive expression form for any O(Q×G) array on the submission's ranking
   path (MUST):** `a + b - 2*c`, `np.where(cond, x, np.zeros_like(y))`, and
   `weight * a + (1 - weight) * b` each read as a single line but allocate
-  one full-size temporary per operator - on a ~3462×33407 gallery that is
-  ~463MB per float32 temporary, and several stack up across one
-  expression. `_hybrid_distance`, `_minmax_per_query`, `_nll_distance`,
+  one full-size temporary per operator, and on a real gallery several
+  hundred-MB temporaries stack up across one expression. `_hybrid_distance`, `_minmax_per_query`, `_nll_distance`,
   and `_l1_distance` (and their identical library copies in
   `src/wacv/evaluation/__init__.py`) held up to four such arrays alive at
   once before this was rewritten to mutate a single scratch buffer
-  through each step - cut measured peak RSS on the real shape by 47%
-  (2808MB -> 1492MB) with zero output change (verified against this
-  repo's own naive-loop parity tests, not assumed). Apply this only where
+  through each step - which cut measured peak memory on the real shape
+  substantially with zero output change (verified against this repo's own
+  naive-loop parity tests, not assumed; numbers in the parent workspace's
+  `records/ROUTER.md`, "Submission incidents"). Apply this only where
   the array being mutated is a scratch value nothing else reads
   afterward - state that ownership assumption in the function's
   docstring, the way `_dual_softmax_rerank`'s and `_minmax_per_query`'s
@@ -435,6 +487,15 @@ here.
   the key value, only ever `username` when falling back to the
   home-directory file *~/.kaggle/kaggle.json*.
 
+  **Hugging Face Hub (gated models, e.g. EmbeddingGemma):** put a
+  read token in `.env` as `HF_TOKEN` (see `.env.example`;
+  `HUGGING_FACE_HUB_TOKEN` is an accepted alias). Prefer that over
+  interactive `hf auth login` / `huggingface-cli login`, which remains an
+  optional fallback when neither env var is set.
+  `scripts/download-hf-model.py` loads `.env` the same way
+  `remote-training.py` does. Accept the model licence on the Hub page
+  before downloading; never commit tokens.
+
   **Colab with no human present (verified):** `colab`'s default
   `--auth adc` uses Google's Application Default Credentials. A human
   runs, once, on any machine with a browser (does not have to be the
@@ -525,9 +586,55 @@ here.
   rules.
 - Add code to `run.py`/the submission entry point that reaches the network
   at inference time.
-- Commit Kaggle/Colab credentials (`.env`, `kaggle.json`, `access_token`,
-  OAuth config) anywhere in this repo, or `git clone` this repo from inside
-  a Kaggle kernel or Colab VM (stage a self-contained folder instead —
-  `src/wacv/remote/stage.py`).
+- Commit Kaggle/Colab/Hugging Face credentials (`.env`, `kaggle.json`,
+  `access_token`, `HF_TOKEN`, OAuth config) anywhere in this repo, or
+  `git clone` this repo from inside a Kaggle kernel or Colab VM (stage a
+  self-contained folder instead — `src/wacv/remote/stage.py`).
 
 </delivery_gates>
+
+<required>
+
+## Rules learned from past mistakes (MUST)
+
+Rules only. The evidence behind each one (which run, which numbers, when)
+lives in the parent workspace's experiment docs and `records/`; look there,
+do not copy it here.
+
+- **Check a library claim against the installed source before writing it**
+  in code, a docstring or a doc. Read the module in `.venv`; do not rely on
+  memory of how a library behaves.
+- **Never build a tensor inside a traced `forward`.** `torch.jit.trace`
+  freezes it to the tracing device. Use a registered buffer.
+- **Smoke every package on the CUDA path, not only on CPU.** `run.py` falls
+  back to CPU when its CUDA probe fails, which turns a device bug into a
+  timeout. Confirm the smoke log reports CUDA, and compare the package's
+  probabilities with the eager model on a few val images.
+- **Rebuild or refresh the zip after any `submission/run.py` change,** and
+  record its checksum where the package is documented.
+- **No performance setting without a measurement** recorded in the
+  experiment's docs. Eval loaders do not keep persistent workers.
+- **A timing is a proxy only on an idle GPU.** Check `nvidia-smi` first;
+  record a timing taken next to another job as contended, never as the proxy.
+  Proxy or conservative A10 estimates must not hard-block packaging or
+  submit advice by themselves; record them, and hard-block on time only
+  with hard Codabench evidence of an official-limit timeout kill. Parent
+  workspace counterexample: 3-view E103 (970882) was marked do-not-submit
+  on proxy timing yet scored exit 0 on Codabench (see parent
+  `records/ROUTER.md`, "Evaluator and package gate"). Whether a candidate
+  is **worth packaging / worth a slot** (local vs B*, final bar = beat B*
+  test mADM) is decided in the parent `AGENTS.md` ("Worth packaging /
+  worth a slot") and `records/ROUTER.md` — do not invent a second gate here.
+- **"No behaviour change" needs proof.** Keep the old implementation as a
+  test oracle and compare outputs on real data.
+- **Assert in the test body,** not inside a helper, so a reader can see what
+  fails.
+- **After `git commit`, `git status` must be clean of the files you meant to
+  include.** Push branches as `git push origin <branch>`; a bare `git push`
+  can target `main`.
+- **Multi-line edits go in a script file.** Never combine a heredoc with a
+  second stdin redirect, and never chain heredocs with `||`.
+- **Name by what the caller reads:** plain verbs that match sibling methods,
+  `can_`/`is_` for yes/no answers, and the words the ledgers already use.
+
+</required>

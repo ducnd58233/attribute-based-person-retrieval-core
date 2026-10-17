@@ -1,0 +1,34 @@
+# E81 / H82: frozen E74b cell on E17 V-deg probabilities (identity TTA).
+# Mechanism check only — not a MEVID forecast (H71 falsified).
+model:
+  name: clip_vit_b16
+  pretrained: false
+  dropout: 0.1
+
+data:
+  root: data
+  batch_size: 32
+  num_workers: 4
+  limit: null
+
+run:
+  name: e81_smoothing_vdeg
+  output_dir: runs
+  seed: 42
+  device: auto
+  progress: true
+
+ranking:
+  distance: hybrid
+  temperature: 1.0
+  alpha: 0.5
+  query_norm: dual_softmax
+  query_norm_tau: 0.05
+  neighbour_smooth:
+    k: 5
+    beta: 0.7
+    min_similarity: 0.95
+
+inference:
+  tta:
+    - identity

@@ -102,8 +102,8 @@ def build_loaders(
     val_dataset = AttributeDataset(
         val_gt, config.data.root, eval_transform, attribute_names=attribute_names
     )
-    train_loader = build_loader(train_dataset, config.data, device, shuffle=True)
-    val_loader = build_loader(val_dataset, config.data, device, shuffle=False)
+    train_loader = build_loader(train_dataset, config.data, device, training=True)
+    val_loader = build_loader(val_dataset, config.data, device, training=False)
 
     positive_rates = train_gt[list(attribute_names)].astype(float).mean()
     positive_rates = positive_rates.clip(lower=1e-6)
@@ -122,13 +122,7 @@ def build_ranking_eval(
     import numpy as np
 
     from src.wacv.attributes import attribute_names_from_columns
-    from src.wacv.data import (
-        AttributeDataset,
-        build_loader,
-        load_gt,
-        load_queries,
-        transforms_for_model,
-    )
+    from src.wacv.data import build_eval_loader, load_gt, load_queries
     from src.wacv.evaluation import RankingEvalData
 
     val_root = config.data.root / "annotations" / "task2" / "val"
@@ -150,20 +144,15 @@ def build_ranking_eval(
         ground_truth = ground_truth.iloc[: config.data.limit]
         queries = queries[: config.data.limit]
 
-    dataset = AttributeDataset(
-        ground_truth,
-        config.data.root,
-        transforms_for_model(
-            config.model.name, train=False, image_size=config.data.image_size
-        ),
-        attribute_names=attribute_names,
+    loader = build_eval_loader(
+        ground_truth, attribute_names, config.model.name, config.data, device
     )
-    loader = build_loader(dataset, config.data, device, shuffle=False)
     gallery_attrs = ground_truth[list(attribute_names)].to_numpy(dtype=np.int64)
     return RankingEvalData(
         queries=queries,
         gallery_attrs=gallery_attrs,
         gallery_loader=loader,
+        gallery_images=tuple(str(image) for image in ground_truth["image"]),
     )
 
 

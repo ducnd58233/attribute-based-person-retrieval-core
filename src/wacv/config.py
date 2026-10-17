@@ -27,6 +27,7 @@ ModelName = Literal[
     "dinov2_vitb14_reg",
 ]
 DeviceName = Literal["auto", "cpu", "cuda", "tpu"]
+LoraTarget = Literal["out_proj", "in_proj", "mlp"]
 DistanceName = Literal[
     "l1", "specker", "clear_hard", "nll", "hybrid", "group_categorical"
 ]
@@ -107,6 +108,14 @@ class ModelConfig(StrictConfig):
         description="If >0, inject LoRA on CLIP attention out_proj (PEFT).",
     )
     lora_alpha: PositiveFloat = 16.0
+    lora_targets: list[LoraTarget] = Field(
+        default_factory=lambda: ["out_proj"],
+        min_length=1,
+        description=(
+            "CLIP layers that get LoRA: attention out_proj, fused attention "
+            "in_proj (q/k/v), and/or the MLP c_fc/c_proj Linears."
+        ),
+    )
     weights_path: ConfigPath | None = Field(
         default=None,
         description=(
@@ -149,6 +158,13 @@ class DataConfig(StrictConfig):
     root: ConfigPath = Path("data")
     batch_size: PositiveInt = 32
     num_workers: NonNegativeInt = 4
+    eval_batch_size: PositiveInt = Field(
+        default=64,
+        description=(
+            "Batch size for val/eval loaders. Eval runs in eval mode with no "
+            "batch statistics, so this changes speed and memory, not results."
+        ),
+    )
     limit: PositiveInt | None = None
     train_augmentation: bool = True
     train_domains: list[DomainName] | None = None
@@ -218,9 +234,37 @@ class InferenceConfig(StrictConfig):
         description="Views to average probabilities over: identity, hflip, "
         "scale_crop (1.15x bilinear upsample then center-crop).",
     )
+    amp: Literal["none", "bf16", "fp16"] = Field(
+        default="none",
+        description=(
+            "CUDA autocast for eval forwards. bf16 matched fp32 within 1.4e-4 "
+            "teacher mADM (E100); none keeps historical numbers bit-exact."
+        ),
+    )
     tta_scale: PositiveFloat = Field(
         default=1.15,
         description="Upsample factor for the scale_crop TTA view.",
+    )
+
+
+class NeighbourSmoothConfig(StrictConfig):
+    """Latent kNN smoothing of gallery attribute probabilities at inference."""
+
+    k: PositiveInt = Field(
+        default=5, description="Nearest gallery neighbours per image, self excluded."
+    )
+    beta: float = Field(
+        default=0.7,
+        gt=0.0,
+        le=1.0,
+        description="Blend weight: p' = (1 - beta) * p + beta * mean(neighbours).",
+    )
+    min_similarity: float = Field(
+        default=0.95,
+        ge=-1.0,
+        le=1.0,
+        description="Cosine gate: neighbours below it are dropped, and an image "
+        "with none left keeps its own probabilities. -1 disables the gate.",
     )
 
 
@@ -260,6 +304,14 @@ class RankingConfig(StrictConfig):
         le=1.0,
         description="Weight on CLEAR cosine term when distance=clear_hard "
         "(rest is Specker L1 on calibrated probs).",
+    )
+    neighbour_smooth: NeighbourSmoothConfig | None = Field(
+        default=None,
+        description="Blend each gallery image's probabilities with its nearest "
+        "neighbours in the pooled-embedding space. None disables smoothing. "
+        "package-submission enables E74b defaults for CLIP/DINOv2 unless "
+        "--no-neighbour-smooth is passed or this field is left null and the "
+        "flag is used; set an explicit block to override k/beta/gate.",
     )
 
 

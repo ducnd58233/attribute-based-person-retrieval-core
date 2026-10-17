@@ -10,6 +10,7 @@ import importlib.util
 from pathlib import Path
 from types import ModuleType
 
+import numpy as np
 import pytest
 import torch
 from PIL import Image
@@ -49,11 +50,14 @@ def test_predict_gallery_prints_progress_per_batch(
     module = _load_run_module()
     module._STATE["model"] = _FakeModel()
     module._STATE["device"] = torch.device("cpu")
+    module._STATE["card"] = {}
     monkeypatch.setattr(module, "BATCH_SIZE", 2)
     gallery = _make_gallery(tmp_path, count=5)
 
-    module._predict_gallery(gallery)
+    probabilities, features = module._predict_gallery(gallery)
 
+    assert probabilities.shape == (5, 3)
+    assert features is None
     output = capsys.readouterr().out
     progress_lines = [line for line in output.splitlines() if "5" in line]
     assert len(progress_lines) >= 3  # 3 batches of size 2, 2, 1
@@ -68,10 +72,80 @@ def test_predict_gallery_progress_mentions_total(
     module = _load_run_module()
     module._STATE["model"] = _FakeModel()
     module._STATE["device"] = torch.device("cpu")
+    module._STATE["card"] = {}
     monkeypatch.setattr(module, "BATCH_SIZE", 3)
     gallery = _make_gallery(tmp_path, count=3)
 
-    module._predict_gallery(gallery)
+    probabilities, features = module._predict_gallery(gallery)
 
+    assert probabilities.shape == (3, 3)
+    assert features is None
     output = capsys.readouterr().out
     assert "3/3" in output
+
+
+class _FakeFeatureModel(nn.Module):
+    def forward(self, images: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        batch = images.shape[0]
+        logits = torch.zeros(batch, 3)
+        features = torch.ones(batch, 4)
+        return logits, features
+
+
+def test_predict_gallery_returns_identity_features_when_requested(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_run_module()
+    module._STATE["model"] = _FakeFeatureModel()
+    module._STATE["device"] = torch.device("cpu")
+    module._STATE["card"] = {"inference_tta": ["identity"]}
+    monkeypatch.setattr(module, "BATCH_SIZE", 2)
+    gallery = _make_gallery(tmp_path, count=3)
+
+    probabilities, features = module._predict_gallery(gallery, with_features=True)
+
+    assert probabilities.shape == (3, 3)
+    assert features is not None
+    assert features.shape == (3, 4)
+
+
+def test_neighbour_smooth_mirrors_library_blend() -> None:
+    module = _load_run_module()
+    probabilities = np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.float32)
+    features = np.array([[1.0, 0.0], [0.99, 0.1]], dtype=np.float32)
+    smooth = {"k": 1, "beta": 1.0, "min_similarity": -1.0}
+
+    smoothed = module._neighbour_smooth(probabilities, features, smooth)
+
+    np.testing.assert_allclose(smoothed[0], probabilities[1], atol=1e-5)
+    np.testing.assert_allclose(smoothed[1], probabilities[0], atol=1e-5)
+
+
+class _MeanModel(nn.Module):
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        return images.mean(dim=(2, 3))
+
+
+def test_decode_workers_match_serial_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_run_module()
+    module._STATE["model"] = _MeanModel()
+    module._STATE["device"] = torch.device("cpu")
+    monkeypatch.setattr(module, "BATCH_SIZE", 2)
+    gallery = _make_gallery(tmp_path, count=7)
+
+    module._STATE["card"] = {}
+    serial, _ = module._predict_gallery(gallery)
+    module._STATE["card"] = {"inference_decode_workers": 4, "inference_amp": "bf16"}
+    threaded, _ = module._predict_gallery(gallery)
+
+    assert threaded.shape == (7, 3)
+    np.testing.assert_allclose(threaded, serial)
+
+
+def test_autocast_rejects_unknown_amp_on_cuda() -> None:
+    module = _load_run_module()
+    with pytest.raises(ValueError, match="inference_amp"):
+        module._autocast(torch.device("cuda"), {"inference_amp": "int8"})

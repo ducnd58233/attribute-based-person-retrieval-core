@@ -7,6 +7,8 @@ Weights live under assets/ (written by scripts/package_submission.py).
 from __future__ import annotations
 
 import json
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Protocol, cast
 
@@ -239,6 +241,9 @@ def load_model() -> None:
     load_device = torch.device("cuda" if prefer_cuda else "cpu")
     if str(card.get("weight_format", "state_dict")) == "torchscript":
         model = torch.jit.load(WEIGHTS_PATH, map_location=load_device)
+        if str(card.get("weight_dtype", "fp32")) == "fp16":
+            # Stored half to halve the zip; compute stays fp32 (or card autocast).
+            model.float()
     else:
         model = _build_model(card)
         state = torch.load(WEIGHTS_PATH, map_location=load_device, weights_only=True)
@@ -255,24 +260,65 @@ def load_model() -> None:
     _STATE["transform"] = _image_transform_from_card(card)
 
 
-def _iter_gallery_tensors(gallery: list[dict[str, Any]], device: torch.device) -> Any:
+def _load_gallery_image(
+    item: dict[str, Any], transform: transforms.Compose
+) -> torch.Tensor:
+    image = Image.open(item["image_path"]).convert("RGB")
+    tensor = transform(image)
+    if not isinstance(tensor, torch.Tensor):
+        raise TypeError("Image transform must return a tensor")
+    return tensor
+
+
+def _iter_gallery_tensors(
+    gallery: list[dict[str, Any]], device: torch.device, *, decode_workers: int = 0
+) -> Any:
+    """Yield image batches in gallery order.
+
+    With ``decode_workers`` > 0, a thread pool decodes the next batch while the
+    caller runs the model on the current one; at most two batches are in flight.
+    """
     total = len(gallery)
     transform = _STATE.get("transform", IMAGE_TRANSFORM)
     if not isinstance(transform, transforms.Compose):
         transform = IMAGE_TRANSFORM
-    for start in range(0, total, BATCH_SIZE):
-        chunk = gallery[start : start + BATCH_SIZE]
-        tensors: list[torch.Tensor] = []
-        for item in chunk:
-            image = Image.open(item["image_path"]).convert("RGB")
-            tensor = transform(image)
-            if not isinstance(tensor, torch.Tensor):
-                raise TypeError("Image transform must return a tensor")
-            tensors.append(tensor)
-        images = torch.stack(tensors, dim=0).to(device, non_blocking=True)
-        done = min(start + BATCH_SIZE, total)
-        print(f"[rank_gallery] {done}/{total} gallery images processed", flush=True)
-        yield images
+    batch_starts = range(0, total, BATCH_SIZE)
+    pool = ThreadPoolExecutor(max_workers=decode_workers) if decode_workers else None
+
+    def submit_batch(start: int) -> list[Future[torch.Tensor]]:
+        assert pool is not None
+        batch = gallery[start : start + BATCH_SIZE]
+        return [pool.submit(_load_gallery_image, item, transform) for item in batch]
+
+    try:
+        next_batch = submit_batch(0) if pool is not None and total else []
+        for start in batch_starts:
+            if pool is None:
+                batch = gallery[start : start + BATCH_SIZE]
+                tensors = [_load_gallery_image(item, transform) for item in batch]
+            else:
+                current_batch = next_batch
+                if start + BATCH_SIZE < total:
+                    next_batch = submit_batch(start + BATCH_SIZE)
+                tensors = [future.result() for future in current_batch]
+            images = torch.stack(tensors, dim=0).to(device, non_blocking=True)
+            done = min(start + BATCH_SIZE, total)
+            print(f"[rank_gallery] {done}/{total} gallery images processed", flush=True)
+            yield images
+    finally:
+        if pool is not None:
+            pool.shutdown(wait=False, cancel_futures=True)
+
+
+def _autocast(device: torch.device, card: dict[str, Any]) -> Any:
+    """Half-precision autocast on CUDA when the card asks for it."""
+    amp = str(card.get("inference_amp", "none"))
+    if device.type != "cuda" or amp == "none":
+        return nullcontext()
+    dtypes = {"bf16": torch.bfloat16, "fp16": torch.float16}
+    if amp not in dtypes:
+        raise ValueError(f"Unknown inference_amp {amp!r}; expected none/bf16/fp16")
+    return torch.autocast(device_type="cuda", dtype=dtypes[amp])
 
 
 def _apply_tta_view(
@@ -296,7 +342,10 @@ def _apply_tta_view(
     raise ValueError(f"Unknown TTA view {view!r}")
 
 
-def _predict_gallery(gallery: list[dict[str, Any]]) -> np.ndarray:
+def _predict_gallery(
+    gallery: list[dict[str, Any]], *, with_features: bool = False
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """Probabilities, and identity-view pooled features when ``with_features``."""
     load_model()
     model = _STATE["model"]
     device = _STATE["device"]
@@ -309,20 +358,68 @@ def _predict_gallery(gallery: list[dict[str, Any]]) -> np.ndarray:
         tta_views = [str(v) for v in raw_tta]
     else:
         tta_views = ["identity"]
+    if with_features and "identity" not in tta_views:
+        raise ValueError("neighbour_smooth needs the identity view in inference_tta")
     tta_scale = float(card.get("inference_tta_scale", 1.15))
     batches: list[np.ndarray] = []
-    with torch.inference_mode():
-        for images in _iter_gallery_tensors(gallery, device):
+    feature_batches: list[np.ndarray] = []
+    with torch.inference_mode(), _autocast(device, card):
+        for images in _iter_gallery_tensors(
+            gallery, device, decode_workers=int(card.get("inference_decode_workers", 0))
+        ):
             probs_sum: torch.Tensor | None = None
             for view in tta_views:
-                logits = model(_apply_tta_view(images, view, scale=tta_scale))
-                probs = torch.sigmoid(logits)
+                output = model(_apply_tta_view(images, view, scale=tta_scale))
+                logits = output[0] if isinstance(output, tuple) else output
+                if with_features and view == "identity":
+                    if not isinstance(output, tuple):
+                        raise TypeError("model must return (logits, features)")
+                    feature_batches.append(output[1].float().cpu().numpy())
+                probs = torch.sigmoid(logits.float())
                 probs_sum = probs if probs_sum is None else probs_sum + probs
             assert probs_sum is not None
             batches.append((probs_sum / float(len(tta_views))).float().cpu().numpy())
     if not batches:
         raise ValueError("Gallery is empty")
-    return np.concatenate(batches, axis=0)
+    features = np.concatenate(feature_batches, axis=0) if with_features else None
+    return np.concatenate(batches, axis=0), features
+
+
+def _neighbour_smooth(
+    probabilities: np.ndarray, features: np.ndarray, smooth: dict[str, Any]
+) -> np.ndarray:
+    """Blend each image with its nearest gallery neighbours (cosine, gated).
+
+    Mirrors ``src/wacv/evaluation/smoothing.py``; this file ships alone.
+    """
+    count = len(probabilities)
+    k = min(int(smooth["k"]), count - 1)
+    if k < 1:
+        return probabilities
+    beta = float(smooth["beta"])
+    gate = float(smooth["min_similarity"])
+    unit = features.astype(np.float32)
+    unit /= np.maximum(np.linalg.norm(unit, axis=1, keepdims=True), 1e-12)
+    smoothed = probabilities.copy()
+    chunk = 2048
+    for start in range(0, count, chunk):
+        similarity = unit[start : start + chunk] @ unit.T
+        rows = np.arange(similarity.shape[0])
+        similarity[rows, start + rows] = -np.inf
+        nearest = np.argpartition(-similarity, k - 1, axis=1)[:, :k]
+        kept = np.take_along_axis(similarity, nearest, axis=1) >= gate
+        weights = kept.astype(np.float32)
+        kept_count = weights.sum(axis=1)
+        has_neighbours = kept_count > 0
+        neighbour_sum = (probabilities[nearest] * weights[..., None]).sum(axis=1)
+        neighbour_mean = (
+            neighbour_sum[has_neighbours] / kept_count[has_neighbours, None]
+        )
+        block = smoothed[start : start + similarity.shape[0]]
+        block[has_neighbours] = (1.0 - beta) * block[
+            has_neighbours
+        ] + beta * neighbour_mean
+    return smoothed
 
 
 def _predict_gallery_embeddings(gallery: list[dict[str, Any]]) -> np.ndarray:
@@ -540,8 +637,9 @@ def _dual_softmax_rerank(
     a large QxG matrix does not allocate multi-GB float64 temporaries and get
     the Codabench worker OOM-killed ("Child task failed or non-zero return").
 
-    Mutates and returns its own float32-cast copy of ``distances`` in place
-    rather than allocating a second full Q x G output array: on the real E17
+    Works in place: a float32 ``distances`` is overwritten and returned (any
+    other dtype is cast to a float32 copy first), rather than allocating a
+    second full Q x G output array: on the real E17
     gallery shape (~3462x33407) that second array was itself a ~463MB
     allocation the caller never needed once the chunked loop below can write
     every result straight back over the value it read. Safe because
@@ -625,9 +723,15 @@ def _score_gallery_distances(
 
 def rank_gallery(sample: dict[str, Any]) -> dict[str, Any]:
     """Return distances between query vectors and gallery probabilities."""
-    probabilities = _predict_gallery(sample["gallery"])
-    queries = np.asarray(sample["queries"], dtype=np.float32)
+    load_model()
     card = _STATE["card"] if isinstance(_STATE["card"], dict) else {}
+    smooth = card.get("neighbour_smooth")
+    probabilities, features = _predict_gallery(
+        sample["gallery"], with_features=isinstance(smooth, dict)
+    )
+    if isinstance(smooth, dict) and features is not None:
+        probabilities = _neighbour_smooth(probabilities, features, smooth)
+    queries = np.asarray(sample["queries"], dtype=np.float32)
     temperature = float(card.get("ranking_temperature", 1.5))
     if str(card.get("ranking_calibration", "none")) == "per_attribute":
         temps = _load_calibration_temperatures()

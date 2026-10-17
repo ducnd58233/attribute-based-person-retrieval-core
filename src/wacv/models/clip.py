@@ -4,20 +4,20 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Protocol, cast
+from typing import Protocol, cast, get_args
 
 import open_clip
 import torch
 import torch.nn.functional as F
 from torch import nn
 
-from src.wacv.config import MODEL_NATIVE_IMAGE_SIZE
+from src.wacv.config import MODEL_NATIVE_IMAGE_SIZE, LoraTarget
 from src.wacv.models._common import (
     build_layerwise_param_groups,
     classification_head,
     set_requires_grad,
 )
-from src.wacv.models.lora import inject_lora_into_linear
+from src.wacv.models.lora import inject_lora_into_linear, inject_lora_into_parameter
 
 
 class _SizedVisual(Protocol):
@@ -135,24 +135,47 @@ class ClipAttributeClassifier(nn.Module):
         """Unfreeze the vision tower (full fine-tune stage)."""
         set_requires_grad(self.visual, True)
 
-    def inject_attention_lora(self, *, rank: int, alpha: float = 16.0) -> int:
-        """Parametrize each attention ``out_proj.weight`` with LoRA; return count.
+    def add_lora_adapters(
+        self,
+        *,
+        rank: int,
+        alpha: float = 16.0,
+        targets: tuple[LoraTarget, ...] = ("out_proj",),
+    ) -> int:
+        """Add LoRA to the chosen layers of every transformer block; return count.
 
+        ``out_proj``: attention output projection. ``in_proj``: the fused q/k/v
+        projection weight of ``MultiheadAttention``. ``mlp``: both MLP Linears.
         Base visual weights stay frozen; only LoRA A/B (and the attribute head)
-        remain trainable. Uses attention out-projections only (fused in_proj is
-        left frozen) so packaging stays peft-free. Parametrization is required
-        because ``MultiheadAttention`` applies ``out_proj`` via ``F.linear`` on
-        ``.weight``, not ``out_proj.forward``.
+        train. LoRA is a weight parametrization because ``MultiheadAttention``
+        reads its weights directly instead of calling the Linear modules.
         """
+        unknown = set(targets) - set(get_args(LoraTarget))
+        if unknown:
+            raise ValueError(f"unknown LoRA targets {sorted(unknown)}")
         self.freeze_backbone()
-        replaced = 0
+        adapted = 0
         for block in _resblocks(self.visual):
-            out_proj = block.get_submodule("attn.out_proj")
-            if not isinstance(out_proj, nn.Linear):
-                raise TypeError(f"expected attn.out_proj Linear, got {type(out_proj)}")
-            inject_lora_into_linear(out_proj, rank=rank, alpha=alpha)
-            replaced += 1
-        return replaced
+            linear_names = []
+            if "out_proj" in targets:
+                linear_names.append("attn.out_proj")
+            if "mlp" in targets:
+                linear_names += ["mlp.c_fc", "mlp.c_proj"]
+            for name in linear_names:
+                linear = block.get_submodule(name)
+                if not isinstance(linear, nn.Linear):
+                    raise TypeError(f"expected {name} to be Linear, got {type(linear)}")
+                inject_lora_into_linear(linear, rank=rank, alpha=alpha)
+                adapted += 1
+            if "in_proj" in targets:
+                inject_lora_into_parameter(
+                    block.get_submodule("attn"),
+                    "in_proj_weight",
+                    rank=rank,
+                    alpha=alpha,
+                )
+                adapted += 1
+        return adapted
 
     def layerwise_param_groups(
         self,
@@ -180,6 +203,7 @@ def build_clip_attribute_classifier(
     tower: ClipTowerSpec = _CLIP_B16,
     lora_rank: int = 0,
     lora_alpha: float = 16.0,
+    lora_targets: tuple[LoraTarget, ...] = ("out_proj",),
 ) -> ClipAttributeClassifier:
     """Build a CLIP vision tower with pos embeddings for the tower crop size."""
     model, _, _ = open_clip.create_model_and_transforms(
@@ -208,7 +232,9 @@ def build_clip_attribute_classifier(
         image_size=(tower.image_height, tower.image_width),
     )
     if lora_rank > 0:
-        classifier.inject_attention_lora(rank=lora_rank, alpha=lora_alpha)
+        classifier.add_lora_adapters(
+            rank=lora_rank, alpha=lora_alpha, targets=lora_targets
+        )
     return classifier
 
 
@@ -219,8 +245,9 @@ def build_clip_vit_l14(
     dropout: float,
     lora_rank: int = 16,
     lora_alpha: float = 16.0,
+    lora_targets: tuple[LoraTarget, ...] = ("out_proj",),
 ) -> ClipAttributeClassifier:
-    """CLIP ViT-L/14 at 224x112 with attention out_proj LoRA (PromptPAR-lite)."""
+    """CLIP ViT-L/14 at 224x112 with LoRA on ``lora_targets`` (PromptPAR-lite)."""
     return build_clip_attribute_classifier(
         num_attributes=num_attributes,
         pretrained=pretrained,
@@ -228,4 +255,5 @@ def build_clip_vit_l14(
         tower=_CLIP_L14,
         lora_rank=lora_rank,
         lora_alpha=lora_alpha,
+        lora_targets=lora_targets,
     )

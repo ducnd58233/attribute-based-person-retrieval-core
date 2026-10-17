@@ -57,14 +57,14 @@ def specker_distance(
     """Calibrated attribute distance (Specker ICIP 2021 ADAPT).
 
     Temperature-calibrate gallery probabilities, then L1 to binary queries.
+    For 0/1 queries, ``sum|q - p| = sum(p) + q . (1 - 2p)``: one matmul and one
+    in-place add, so a single Q x G array instead of three.
     """
     calibrated = calibrate_probabilities(probabilities, temperature)
     query_values = queries.astype(np.float32)
-    return (
-        query_values.sum(axis=1, keepdims=True)
-        + calibrated.sum(axis=1)[None, :]
-        - 2.0 * query_values @ calibrated.T
-    )
+    out = query_values @ (1.0 - 2.0 * calibrated).T
+    out += calibrated.sum(axis=1)[None, :]
+    return out
 
 
 def clear_hard_distance(

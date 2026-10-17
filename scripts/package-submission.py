@@ -8,9 +8,12 @@ import shutil
 import sys
 import zipfile
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
+
+if TYPE_CHECKING:
+    from src.wacv.config import ExperimentConfig
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -18,6 +21,26 @@ if str(ROOT) not in sys.path:
 
 _ZIP_EXCLUDED_DIR_NAMES = {"__pycache__", ".git"}
 _ZIP_EXCLUDED_FILE_NAMES = {".DS_Store"}
+
+
+class _LogitsAndFeatures(torch.nn.Module):
+    """Traceable wrapper returning ``(logits, pooled features)`` for smoothing."""
+
+    def __init__(self, model: torch.nn.Module) -> None:
+        super().__init__()
+        from src.wacv.evaluation import FeatureEncoder
+
+        if not isinstance(model, FeatureEncoder):
+            raise TypeError(
+                f"{type(model).__name__} has no encode_features; "
+                "neighbour_smooth supports the CLIP and DINOv2 classifiers"
+            )
+        self.model = model
+        self.head = model.get_submodule("head")
+
+    def forward(self, images: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        features = self.model.encode_features(images)
+        return self.head(features), features
 
 
 def parse_args() -> argparse.Namespace:
@@ -29,6 +52,38 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         required=True,
         help="Trainer checkpoint (full payload or state_dict)",
+    )
+    parser.add_argument(
+        "--member",
+        type=Path,
+        action="append",
+        default=[],
+        metavar="CHECKPOINT",
+        help=(
+            "Extra checkpoint built from the same --config; the package then "
+            "traces an equal-weight probability average of all checkpoints"
+        ),
+    )
+    parser.add_argument(
+        "--decode-workers",
+        type=int,
+        default=0,
+        help="inference_decode_workers in model_card.json (0 = serial decode)",
+    )
+    parser.add_argument(
+        "--weights-dtype",
+        choices=("fp32", "fp16"),
+        default="fp32",
+        help=(
+            "Store TorchScript weights in fp16 (half the zip and load time); "
+            "run.py upcasts them to fp32 after loading"
+        ),
+    )
+    parser.add_argument(
+        "--amp",
+        choices=("none", "bf16", "fp16"),
+        default="none",
+        help="inference_amp in model_card.json (CUDA autocast at inference)",
     )
     parser.add_argument(
         "--config",
@@ -59,36 +114,94 @@ def parse_args() -> argparse.Namespace:
             "Use a shorter list when packaging for Codabench's 1-hour wall clock."
         ),
     )
+    parser.add_argument(
+        "--no-neighbour-smooth",
+        action="store_true",
+        help=(
+            "Disable latent kNN smoothing in the package. By default CLIP and "
+            "DINOv2 packages enable E74b gated smoothing (or the config block)."
+        ),
+    )
     return parser.parse_args()
 
 
+def _resolve_neighbour_smooth(
+    config: ExperimentConfig, *, disable: bool
+) -> dict[str, float | int] | None:
+    """Return the model-card smoothing block, or None when disabled/unsupported."""
+    from src.wacv.config import NeighbourSmoothConfig
+
+    if disable:
+        return None
+    supported = config.model.name.startswith("clip_") or config.model.name.startswith(
+        "dinov2_"
+    )
+    if not supported:
+        if config.ranking.neighbour_smooth is not None:
+            raise ValueError(
+                "ranking.neighbour_smooth needs a CLIP or DINOv2 checkpoint "
+                f"(got {config.model.name})"
+            )
+        return None
+    smooth = config.ranking.neighbour_smooth
+    if smooth is None:
+        # Packaging default: E74b gated settings (on unless --no-neighbour-smooth).
+        smooth = NeighbourSmoothConfig()
+    return smooth.model_dump()
+
+
 def _export_weights(
-    checkpoint: Path, config_path: Path, destination: Path
+    checkpoints: list[Path],
+    config_path: Path,
+    destination: Path,
+    *,
+    disable_neighbour_smooth: bool,
 ) -> dict[str, Any]:
     from src.wacv.attributes import attribute_names_from_gt
     from src.wacv.checkpoint import load_model_weights
     from src.wacv.config import load_config
     from src.wacv.models import build_model
+    from src.wacv.models.ensemble import ProbabilityAverage
     from src.wacv.normalization import normalization_for_model
 
     config = load_config(config_path)
     gt_path = config.data.root / "annotations" / "task1" / "train" / "gt.csv"
     num_attributes = len(attribute_names_from_gt(gt_path))
-    model = build_model(
-        config.model.model_copy(update={"pretrained": False}),
-        num_attributes=num_attributes,
-    )
-    load_model_weights(checkpoint.resolve(), model, map_location=torch.device("cpu"))
+    members: list[torch.nn.Module] = []
+    for checkpoint in checkpoints:
+        member = build_model(
+            config.model.model_copy(update={"pretrained": False}),
+            num_attributes=num_attributes,
+        )
+        load_model_weights(
+            checkpoint.resolve(), member, map_location=torch.device("cpu")
+        )
+        members.append(member)
+    model: torch.nn.Module = members[0]
+    if len(members) > 1:
+        if not disable_neighbour_smooth:
+            raise ValueError(
+                "a probability-average package needs --no-neighbour-smooth"
+            )
+        model = ProbabilityAverage(members, [1.0 / len(members)] * len(members))
     destination.parent.mkdir(parents=True, exist_ok=True)
     weight_format = "state_dict"
     image_h, image_w = config.data.image_size
     stats = normalization_for_model(config.model.name)
+    neighbour_smooth = _resolve_neighbour_smooth(
+        config, disable=disable_neighbour_smooth
+    )
     if config.model.name.startswith("clip_") or config.model.name.startswith("dinov2_"):
         # TorchScript avoids vendoring open_clip / DINOv2 hub code into the eval image.
         model.eval()
         example = torch.zeros(1, 3, image_h, image_w)
+        traced_module = (
+            _LogitsAndFeatures(model) if neighbour_smooth is not None else model
+        )
         with torch.inference_mode():
-            traced = cast(torch.jit.ScriptModule, torch.jit.trace(model, example))
+            traced = cast(
+                torch.jit.ScriptModule, torch.jit.trace(traced_module, example)
+            )
         traced.save(str(destination))
         weight_format = "torchscript"
     else:
@@ -99,7 +212,8 @@ def _export_weights(
         "num_attributes": num_attributes,
         "hard_query_adapter": bool(config.model.hard_query_adapter),
         "adapter_dim": int(config.model.adapter_dim),
-        "source_checkpoint": str(checkpoint),
+        "source_checkpoint": str(checkpoints[0]),
+        "source_checkpoints": [str(path) for path in checkpoints],
         "weight_format": weight_format,
         "image_size": [image_h, image_w],
         "image_mean": list(stats.mean),
@@ -114,7 +228,23 @@ def _export_weights(
         "clear_fusion": float(config.ranking.clear_fusion),
         "inference_tta": list(config.inference.tta),
         "inference_tta_scale": float(config.inference.tta_scale),
+        "neighbour_smooth": neighbour_smooth,
     }
+
+
+def _convert_torchscript_to_fp16(path: Path, card: dict[str, Any]) -> None:
+    """Rewrite a TorchScript package with fp16 parameters and buffers.
+
+    CLIP's released weights are fp16 already, so the frozen tower loses
+    nothing; only trained adapters and heads are rounded.
+    """
+    if card["weight_format"] != "torchscript":
+        raise ValueError(
+            "--weights-dtype fp16 needs a TorchScript (CLIP/DINOv2) package"
+        )
+    module = torch.jit.load(str(path), map_location="cpu")
+    module.half()
+    module.save(str(path))
 
 
 def _zip_submission(source: Path, destination: Path) -> None:
@@ -153,7 +283,12 @@ def main() -> None:
 
     assets = out / "assets"
     assets.mkdir()
-    card = _export_weights(args.checkpoint, args.config, assets / "model.pt")
+    card = _export_weights(
+        [args.checkpoint, *args.member],
+        args.config,
+        assets / "model.pt",
+        disable_neighbour_smooth=bool(args.no_neighbour_smooth),
+    )
     from src.wacv.config import load_config as _load_config
 
     packed_config = _load_config(args.config)
@@ -168,6 +303,13 @@ def main() -> None:
         if not views:
             raise ValueError("--tta requires at least one view name")
         card["inference_tta"] = views
+    card["weight_dtype"] = str(args.weights_dtype)
+    if args.weights_dtype == "fp16":
+        _convert_torchscript_to_fp16(assets / "model.pt", card)
+    card["inference_decode_workers"] = int(args.decode_workers)
+    card["inference_amp"] = str(args.amp)
+    if card["neighbour_smooth"] is not None and "identity" not in card["inference_tta"]:
+        raise ValueError("neighbour_smooth takes its features from the identity view")
     (assets / "model_card.json").write_text(
         json.dumps(card, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )

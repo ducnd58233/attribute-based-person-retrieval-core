@@ -32,6 +32,30 @@ class _LoRAWeight(nn.Module):
         return weight + (self.lora_B @ self.lora_A) * self.scaling
 
 
+def inject_lora_into_parameter(
+    module: nn.Module, name: str, *, rank: int, alpha: float
+) -> nn.Module:
+    """Attach LoRA to a 2-D weight parameter that is not a Linear (e.g. MHA in_proj).
+
+    The base weight is frozen; ``(out, in)`` comes from the parameter's shape.
+    """
+    if rank < 1:
+        raise ValueError(f"LoRA rank must be >= 1, got {rank}")
+    weight = module.get_parameter(name)
+    if weight.dim() != 2:
+        raise ValueError(
+            f"{name} must be 2-D for LoRA, got shape {tuple(weight.shape)}"
+        )
+    weight.requires_grad = False
+    out_features, in_features = weight.shape
+    register_parametrization(
+        module,
+        name,
+        _LoRAWeight(in_features, out_features, rank=rank, alpha=alpha),
+    )
+    return module
+
+
 def inject_lora_into_linear(module: nn.Linear, *, rank: int, alpha: float) -> nn.Linear:
     """Attach LoRA to ``module.weight`` via parametrization; freeze base W/b.
 
