@@ -50,7 +50,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--checkpoint",
         type=Path,
-        required=True,
+        default=None,
         help="Trainer checkpoint (full payload or state_dict)",
     )
     parser.add_argument(
@@ -62,6 +62,19 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Extra checkpoint built from the same --config; the package then "
             "traces an equal-weight probability average of all checkpoints"
+        ),
+    )
+    parser.add_argument(
+        "--from-member-dir",
+        type=Path,
+        action="append",
+        default=[],
+        metavar="DIR",
+        help=(
+            "Prebuilt KEEP/submission dir with model.pt + model_card.json "
+            "(or assets/). Heterogeneous image_size/mean/std OK; equal-weight "
+            "average via run.py per-member transforms. Requires "
+            "--no-neighbour-smooth. Do not combine with --checkpoint/--member."
         ),
     )
     parser.add_argument(
@@ -232,6 +245,117 @@ def _export_weights(
     }
 
 
+def _resolve_member_dir_assets(member_dir: Path) -> tuple[Path, Path]:
+    """Return (model.pt, model_card.json) under a KEEP or packaged submission dir."""
+    root = member_dir.resolve()
+    candidates = (
+        (root / "model.pt", root / "model_card.json"),
+        (root / "assets" / "model.pt", root / "assets" / "model_card.json"),
+    )
+    for weights, card_path in candidates:
+        if weights.is_file() and card_path.is_file():
+            return weights, card_path
+    raise FileNotFoundError(
+        f"{root} needs model.pt + model_card.json (root or assets/)"
+    )
+
+
+def _copy_or_link(source: Path, destination: Path) -> None:
+    """Prefer a hardlink to save disk; fall back to a full copy."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        destination.unlink()
+    try:
+        destination.hardlink_to(source)
+    except OSError:
+        shutil.copy2(source, destination)
+
+
+def _assemble_from_member_dirs(
+    member_dirs: list[Path],
+    assets_dir: Path,
+    *,
+    tta: list[str] | None,
+    decode_workers: int,
+    amp: str,
+) -> dict[str, Any]:
+    """Build a multi-TorchScript package with per-member preprocess fields."""
+    if len(member_dirs) < 2:
+        raise ValueError("--from-member-dir needs at least two directories")
+    members: list[dict[str, Any]] = []
+    ranking_source: dict[str, Any] | None = None
+    equal_weight = 1.0 / len(member_dirs)
+    for index, member_dir in enumerate(member_dirs):
+        weights_path, card_path = _resolve_member_dir_assets(member_dir)
+        source_card = json.loads(card_path.read_text(encoding="utf-8"))
+        if ranking_source is None:
+            ranking_source = source_card
+        if str(source_card.get("weight_format", "state_dict")) != "torchscript":
+            raise ValueError(
+                f"{member_dir}: only TorchScript members are supported "
+                f"(got weight_format={source_card.get('weight_format')!r})"
+            )
+        if source_card.get("neighbour_smooth") is not None:
+            raise ValueError(
+                f"{member_dir}: source card has neighbour_smooth; "
+                "refuse to package gallery smoothing"
+            )
+        dest_name = f"model_{index}.pt"
+        _copy_or_link(weights_path, assets_dir / dest_name)
+        member_tta = (
+            list(tta)
+            if tta is not None
+            else [str(view) for view in source_card.get("inference_tta", ["identity"])]
+        )
+        if not member_tta:
+            raise ValueError(f"{member_dir}: empty inference_tta")
+        members.append(
+            {
+                "weights": dest_name,
+                "name": str(source_card["name"]),
+                "num_attributes": int(source_card["num_attributes"]),
+                "image_size": list(source_card["image_size"]),
+                "image_mean": list(source_card["image_mean"]),
+                "image_std": list(source_card["image_std"]),
+                "weight": equal_weight,
+                "weight_format": "torchscript",
+                "weight_dtype": str(source_card.get("weight_dtype", "fp32")),
+                "inference_tta": member_tta,
+                "source_dir": str(member_dir.resolve()),
+            }
+        )
+    assert ranking_source is not None
+    first = members[0]
+    return {
+        "name": "torchscript_members",
+        "num_attributes": int(first["num_attributes"]),
+        "weight_format": "torchscript_members",
+        "source_checkpoints": [str(path.resolve()) for path in member_dirs],
+        "members": members,
+        "image_size": list(first["image_size"]),
+        "image_mean": list(first["image_mean"]),
+        "image_std": list(first["image_std"]),
+        "ranking_distance": ranking_source.get("ranking_distance", "hybrid"),
+        "ranking_temperature": float(ranking_source.get("ranking_temperature", 1.0)),
+        "ranking_alpha": float(ranking_source.get("ranking_alpha", 0.5)),
+        "ranking_group_mode": ranking_source.get("ranking_group_mode", "independent"),
+        "ranking_calibration": ranking_source.get("ranking_calibration", "none"),
+        "ranking_query_norm": ranking_source.get("ranking_query_norm", "dual_softmax"),
+        "ranking_query_norm_tau": float(
+            ranking_source.get("ranking_query_norm_tau", 0.05)
+        ),
+        "clear_fusion": float(ranking_source.get("clear_fusion", 0.5)),
+        "inference_tta": (
+            list(tta) if tta is not None else list(members[0]["inference_tta"])
+        ),
+        "inference_tta_scale": float(ranking_source.get("inference_tta_scale", 1.15)),
+        "neighbour_smooth": None,
+        "inference_decode_workers": int(decode_workers),
+        "inference_amp": str(amp),
+        "weight_dtype": "fp32",
+    }
+
+
 def _convert_torchscript_to_fp16(path: Path, card: dict[str, Any]) -> None:
     """Rewrite a TorchScript package with fp16 parameters and buffers.
 
@@ -261,28 +385,26 @@ def _zip_submission(source: Path, destination: Path) -> None:
             archive.write(path, arcname=str(relative))
 
 
-def main() -> None:
-    from src.wacv.utils import configure_default_logging
+def _check_package_inputs(args: argparse.Namespace, *, use_member_dirs: bool) -> None:
+    """Refuse argument mixes the two packaging paths cannot honour."""
+    if use_member_dirs:
+        if args.checkpoint is not None or args.member:
+            raise ValueError(
+                "--from-member-dir cannot be combined with --checkpoint/--member"
+            )
+        if not args.no_neighbour_smooth:
+            raise ValueError(
+                "a multi-preprocess member package needs --no-neighbour-smooth"
+            )
+    elif args.checkpoint is None:
+        raise ValueError("provide --checkpoint or at least two --from-member-dir")
 
-    configure_default_logging()
-    args = parse_args()
-    template = args.template.resolve()
-    out = args.out.resolve()
-    run_py = template / "run.py"
-    metadata = template / "metadata.yaml"
-    if not run_py.is_file() or not metadata.is_file():
-        raise FileNotFoundError(
-            f"Template missing run.py/metadata.yaml under {template}"
-        )
 
-    if out.exists():
-        shutil.rmtree(out)
-    out.mkdir(parents=True)
-    shutil.copy2(run_py, out / "run.py")
-    shutil.copy2(metadata, out / "metadata.yaml")
-
-    assets = out / "assets"
-    assets.mkdir()
+def _export_checkpoint_package(
+    args: argparse.Namespace, assets: Path
+) -> dict[str, Any]:
+    """Export one or several trainer checkpoints into a single TorchScript file."""
+    assert args.checkpoint is not None
     card = _export_weights(
         [args.checkpoint, *args.member],
         args.config,
@@ -308,6 +430,45 @@ def main() -> None:
         _convert_torchscript_to_fp16(assets / "model.pt", card)
     card["inference_decode_workers"] = int(args.decode_workers)
     card["inference_amp"] = str(args.amp)
+    return card
+
+
+def main() -> None:
+    from src.wacv.utils import configure_default_logging
+
+    configure_default_logging()
+    args = parse_args()
+    template = args.template.resolve()
+    out = args.out.resolve()
+    run_py = template / "run.py"
+    metadata = template / "metadata.yaml"
+    if not run_py.is_file() or not metadata.is_file():
+        raise FileNotFoundError(
+            f"Template missing run.py/metadata.yaml under {template}"
+        )
+
+    member_dirs = [path.resolve() for path in args.from_member_dir]
+    use_member_dirs = bool(member_dirs)
+    _check_package_inputs(args, use_member_dirs=use_member_dirs)
+
+    if out.exists():
+        shutil.rmtree(out)
+    out.mkdir(parents=True)
+    shutil.copy2(run_py, out / "run.py")
+    shutil.copy2(metadata, out / "metadata.yaml")
+
+    assets = out / "assets"
+    assets.mkdir()
+    if use_member_dirs:
+        card = _assemble_from_member_dirs(
+            member_dirs,
+            assets,
+            tta=[str(view) for view in args.tta] if args.tta is not None else None,
+            decode_workers=int(args.decode_workers),
+            amp=str(args.amp),
+        )
+    else:
+        card = _export_checkpoint_package(args, assets)
     if card["neighbour_smooth"] is not None and "identity" not in card["inference_tta"]:
         raise ValueError("neighbour_smooth takes its features from the identity view")
     (assets / "model_card.json").write_text(

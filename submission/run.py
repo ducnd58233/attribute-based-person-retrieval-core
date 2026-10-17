@@ -53,6 +53,21 @@ def _image_transform_from_card(card: dict[str, Any]) -> transforms.Compose:
     )
 
 
+def _member_specs(card: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """Per-member TorchScript specs with their own image_size/mean/std, or None."""
+    raw = card.get("members")
+    if not isinstance(raw, list) or len(raw) < 2:
+        return None
+    return [dict(member) for member in raw if isinstance(member, dict)]
+
+
+def _tta_views_from(spec: dict[str, Any], card: dict[str, Any]) -> list[str]:
+    raw = spec.get("inference_tta", card.get("inference_tta", ["identity"]))
+    if isinstance(raw, list) and raw:
+        return [str(view) for view in raw]
+    return ["identity"]
+
+
 class _HasFc(Protocol):
     fc: nn.Module
 
@@ -231,6 +246,59 @@ def _cuda_forward_works(model: nn.Module, card: dict[str, Any]) -> bool:
     return True
 
 
+def _load_torchscript_member(
+    weights_name: str, *, device: torch.device, weight_dtype: str
+) -> nn.Module:
+    path = HERE / "assets" / weights_name
+    model = torch.jit.load(path, map_location=device)
+    if weight_dtype == "fp16":
+        # Stored half to halve the zip; compute stays fp32 (or card autocast).
+        model.float()
+    model.eval()
+    return model
+
+
+def _load_member_package(
+    card: dict[str, Any],
+    member_specs: list[dict[str, Any]],
+    *,
+    load_device: torch.device,
+    prefer_cuda: bool,
+) -> None:
+    """Load every TorchScript member with its own transform and averaging weight."""
+    models: list[nn.Module] = []
+    transforms_list: list[transforms.Compose] = []
+    weights: list[float] = []
+    for spec in member_specs:
+        member = _load_torchscript_member(
+            str(spec["weights"]),
+            device=load_device,
+            weight_dtype=str(spec.get("weight_dtype", "fp32")),
+        )
+        models.append(member)
+        transforms_list.append(_image_transform_from_card(spec))
+        weights.append(float(spec.get("weight", 1.0 / len(member_specs))))
+    weight_sum = sum(weights)
+    if weight_sum <= 0.0:
+        raise ValueError("member weights must sum to a positive value")
+    weights = [weight / weight_sum for weight in weights]
+    device = load_device
+    if prefer_cuda:
+        for model, spec in zip(models, member_specs, strict=True):
+            if not _cuda_forward_works(model, spec):
+                models = [module.to(torch.device("cpu")) for module in models]
+                device = torch.device("cpu")
+                break
+    _STATE["model"] = models[0]
+    _STATE["models"] = models
+    _STATE["member_transforms"] = transforms_list
+    _STATE["member_weights"] = weights
+    _STATE["member_specs"] = member_specs
+    _STATE["device"] = device
+    _STATE["card"] = card
+    _STATE["transform"] = transforms_list[0]
+
+
 def load_model() -> None:
     """Load weights once. Safe to call repeatedly."""
     if _STATE["model"] is not None:
@@ -239,11 +307,24 @@ def load_model() -> None:
         card = json.load(handle)
     prefer_cuda = torch.cuda.is_available()
     load_device = torch.device("cuda" if prefer_cuda else "cpu")
-    if str(card.get("weight_format", "state_dict")) == "torchscript":
-        model = torch.jit.load(WEIGHTS_PATH, map_location=load_device)
-        if str(card.get("weight_dtype", "fp32")) == "fp16":
-            # Stored half to halve the zip; compute stays fp32 (or card autocast).
-            model.float()
+    member_specs = _member_specs(card)
+    weight_format = str(card.get("weight_format", "state_dict"))
+    if member_specs is not None or weight_format == "torchscript_members":
+        if member_specs is None:
+            raise ValueError("torchscript_members needs a members list")
+        _load_member_package(
+            card,
+            member_specs,
+            load_device=load_device,
+            prefer_cuda=prefer_cuda,
+        )
+        return
+    if weight_format == "torchscript":
+        model = _load_torchscript_member(
+            WEIGHTS_PATH.name,
+            device=load_device,
+            weight_dtype=str(card.get("weight_dtype", "fp32")),
+        )
     else:
         model = _build_model(card)
         state = torch.load(WEIGHTS_PATH, map_location=load_device, weights_only=True)
@@ -255,6 +336,7 @@ def load_model() -> None:
         model = model.to(torch.device("cpu"))
         device = torch.device("cpu")
     _STATE["model"] = model
+    _STATE["models"] = None
     _STATE["device"] = device
     _STATE["card"] = card
     _STATE["transform"] = _image_transform_from_card(card)
@@ -342,14 +424,107 @@ def _apply_tta_view(
     raise ValueError(f"Unknown TTA view {view!r}")
 
 
+def _load_gallery_pil(item: dict[str, Any]) -> Image.Image:
+    return Image.open(item["image_path"]).convert("RGB")
+
+
+def _member_batch_probs(
+    model: nn.Module,
+    transform: transforms.Compose,
+    spec: dict[str, Any],
+    pils: list[Image.Image],
+    *,
+    device: torch.device,
+    card: dict[str, Any],
+) -> torch.Tensor:
+    """One member's TTA-averaged probabilities for a decoded batch."""
+    tensors = [transform(image) for image in pils]
+    typed = [t for t in tensors if isinstance(t, torch.Tensor)]
+    if len(typed) != len(tensors):
+        raise TypeError("Image transform must return a tensor")
+    images = torch.stack(typed, dim=0).to(device, non_blocking=True)
+    tta_scale = float(card.get("inference_tta_scale", 1.15))
+    tta_views = _tta_views_from(spec, card)
+    probs_sum: torch.Tensor | None = None
+    for view in tta_views:
+        output = model(_apply_tta_view(images, view, scale=tta_scale))
+        logits = output[0] if isinstance(output, tuple) else output
+        probs = torch.sigmoid(logits.float())
+        probs_sum = probs if probs_sum is None else probs_sum + probs
+    assert probs_sum is not None
+    return probs_sum / float(len(tta_views))
+
+
+def _predict_gallery_members(
+    gallery: list[dict[str, Any]],
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """Equal-weight (or card-weight) average with per-member preprocess/TTA."""
+    models = _STATE.get("models")
+    transforms_list = _STATE.get("member_transforms")
+    member_weights = _STATE.get("member_weights")
+    member_specs = _STATE.get("member_specs")
+    device = _STATE["device"]
+    card = _STATE["card"] if isinstance(_STATE["card"], dict) else {}
+    if (
+        not isinstance(models, list)
+        or not isinstance(transforms_list, list)
+        or not isinstance(member_weights, list)
+        or not isinstance(member_specs, list)
+        or not isinstance(device, torch.device)
+    ):
+        raise RuntimeError("Multi-member package failed to load")
+    decode_workers = int(card.get("inference_decode_workers", 0))
+    total = len(gallery)
+    if total == 0:
+        raise ValueError("Gallery is empty")
+    batches: list[np.ndarray] = []
+    pool = ThreadPoolExecutor(max_workers=decode_workers) if decode_workers else None
+    try:
+        for start in range(0, total, BATCH_SIZE):
+            items = gallery[start : start + BATCH_SIZE]
+            if pool is None:
+                pils = [_load_gallery_pil(item) for item in items]
+            else:
+                pils = list(pool.map(_load_gallery_pil, items))
+            blended: torch.Tensor | None = None
+            with torch.inference_mode(), _autocast(device, card):
+                for model, transform, weight, spec in zip(
+                    models, transforms_list, member_weights, member_specs, strict=True
+                ):
+                    if not isinstance(model, nn.Module):
+                        raise TypeError("member model must be an nn.Module")
+                    if not isinstance(transform, transforms.Compose):
+                        raise TypeError("member transform must be a Compose")
+                    member_probs = _member_batch_probs(
+                        model, transform, spec, pils, device=device, card=card
+                    )
+                    weighted = member_probs * float(weight)
+                    blended = weighted if blended is None else blended + weighted
+            assert blended is not None
+            batches.append(blended.float().cpu().numpy())
+            done = min(start + BATCH_SIZE, total)
+            print(f"[rank_gallery] {done}/{total} gallery images processed", flush=True)
+    finally:
+        if pool is not None:
+            pool.shutdown(wait=False, cancel_futures=True)
+    return np.concatenate(batches, axis=0), None
+
+
 def _predict_gallery(
     gallery: list[dict[str, Any]], *, with_features: bool = False
 ) -> tuple[np.ndarray, np.ndarray | None]:
     """Probabilities, and identity-view pooled features when ``with_features``."""
     load_model()
+    card = _STATE["card"] if isinstance(_STATE["card"], dict) else {}
+    models = _STATE.get("models")
+    if isinstance(models, list) and len(models) >= 2:
+        if with_features:
+            raise ValueError(
+                "neighbour_smooth is not supported for multi-member packages"
+            )
+        return _predict_gallery_members(gallery)
     model = _STATE["model"]
     device = _STATE["device"]
-    card = _STATE["card"] if isinstance(_STATE["card"], dict) else {}
     if not isinstance(model, nn.Module) or not isinstance(device, torch.device):
         raise RuntimeError("Model failed to load")
     raw_tta = card.get("inference_tta", ["identity"])
