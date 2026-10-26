@@ -1,0 +1,61 @@
+# E121 H121 — RandomAutocontrast + RandomEqualize (each p=0.5) on E40 ViT-L teacher.
+# Bars: LODO-M ≥ 0.7282 (+0.010 vs 0.7182); ID-val drop ≤ 0.010 vs 0.7204 (floor 0.7104).
+# Order: AutoContrast → Equalize → Resize → AugMix → flip → ColorJitter → Normalize → Erase.
+# Eval clean Resize. No CLAHE / degrade / RandAugment / affine. resume: true.
+
+model:
+  name: clip_vit_l14
+  pretrained: true
+  dropout: 0.1
+  freeze_backbone: true
+  lora_rank: 16
+  lora_alpha: 16.0
+
+data:
+  root: data
+  batch_size: 8
+  num_workers: 0
+  limit: null
+  train_augmentation: true
+  image_size: [224, 112]
+  train_domains:
+    - PA100k
+    - PETA
+  autocontrast_equalize:
+    enabled: true
+    autocontrast_p: 0.5
+    equalize_p: 0.5
+
+optimization:
+  epochs: 8
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  pos_weight_clip: 10.0
+  amp: true
+  grad_clip_norm: 1.0
+  ema_decay: 0.999
+  scheduler_factor: 0.1
+  scheduler_patience: 2
+  label_smoothing: 0.05
+  early_stop_patience: 4
+  lp_ft: false
+
+run:
+  name: e121_teacher_autocontrast_equalize
+  output_dir: runs
+  resume: true
+  seed: 42
+  device: auto
+  progress: true
+
+ranking:
+  distance: hybrid
+  temperature: 1.0
+  alpha: 0.5
+  query_norm: dual_softmax
+  query_norm_tau: 0.05
+
+inference:
+  tta:
+    - identity
+  tta_scale: 1.15
