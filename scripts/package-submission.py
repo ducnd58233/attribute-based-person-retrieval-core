@@ -142,8 +142,8 @@ def parse_args() -> argparse.Namespace:
         "--no-neighbour-smooth",
         action="store_true",
         help=(
-            "Disable latent kNN smoothing in the package. By default CLIP and "
-            "DINOv2 packages enable E74b gated smoothing (or the config block)."
+            "Force latent kNN smoothing off, even when the config sets "
+            "ranking.neighbour_smooth. Smoothing is off unless the config asks."
         ),
     )
     return parser.parse_args()
@@ -152,9 +152,12 @@ def parse_args() -> argparse.Namespace:
 def _resolve_neighbour_smooth(
     config: ExperimentConfig, *, disable: bool
 ) -> dict[str, float | int] | None:
-    """Return the model-card smoothing block, or None when disabled/unsupported."""
-    from src.wacv.config import NeighbourSmoothConfig
+    """Return the config's smoothing block, or None when it is unset or disabled.
 
+    Smoothing is a kNN pass over the gallery being ranked, which on Codabench is
+    the hidden test gallery; the organizers do not allow it there, so a package
+    only carries it when the config sets ``ranking.neighbour_smooth`` itself.
+    """
     if disable:
         return None
     supported = config.model.name.startswith("clip_") or config.model.name.startswith(
@@ -168,10 +171,7 @@ def _resolve_neighbour_smooth(
             )
         return None
     smooth = config.ranking.neighbour_smooth
-    if smooth is None:
-        # Packaging default: E74b gated settings (on unless --no-neighbour-smooth).
-        smooth = NeighbourSmoothConfig()
-    return smooth.model_dump()
+    return None if smooth is None else smooth.model_dump()
 
 
 def _export_weights(

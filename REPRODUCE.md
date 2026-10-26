@@ -40,7 +40,10 @@ the members' sigmoid probabilities `p` with the weights above. For a query
 Code: `src/wacv/evaluation/distances.py` (`nll_distance`, `l1_distance`,
 `hybrid_distance`), `src/wacv/evaluation/rerank.py` (`dual_softmax_rerank`),
 and their copies in `submission/run.py`. No re-ranking, neighbour smoothing or
-other pass over the gallery is used (`neighbour_smooth: null`).
+other pass over the gallery is used (`neighbour_smooth: null`). The repository
+keeps a kNN neighbour-smoothing experiment (`src/wacv/evaluation/smoothing.py`,
+measured on the organizer validation split only); it is off unless a config
+sets `ranking.neighbour_smooth`, and no submitted package ever enabled it.
 
 ## Setup
 
