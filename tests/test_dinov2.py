@@ -13,7 +13,7 @@ from src.wacv.data import transforms_for_model
 from src.wacv.models.dinov2 import (
     Dinov2AttributeClassifier,
     build_dinov2_vitb14_reg,
-    load_dinov2_vitb14_reg_backbone,
+    load_dinov2_backbone,
 )
 from src.wacv.models.factory import build_model
 
@@ -105,9 +105,7 @@ def test_load_backbone_reads_local_weights(tmp_path: Path) -> None:
     torch.save(fake.state_dict(), weights_path)
     loaded = _FakeDinov2Backbone()
     with patch("src.wacv.models.dinov2.torch.hub.load", return_value=loaded) as hub:
-        backbone = load_dinov2_vitb14_reg_backbone(
-            pretrained=True, weights_path=weights_path
-        )
+        backbone = load_dinov2_backbone(pretrained=True, weights_path=weights_path)
     assert hub.call_args.kwargs.get("pretrained") is False
     assert backbone is loaded
 

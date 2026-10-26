@@ -25,6 +25,7 @@ ModelName = Literal[
     "clip_vit_b16",
     "clip_vit_l14",
     "dinov2_vitb14_reg",
+    "dinov2_vitl14_reg",
 ]
 DeviceName = Literal["auto", "cpu", "cuda", "tpu"]
 LoraTarget = Literal["out_proj", "in_proj", "mlp"]
@@ -68,6 +69,7 @@ MODEL_NATIVE_IMAGE_SIZE: dict[str, tuple[int, int]] = {
     "clip_vit_b16": (256, 128),
     "clip_vit_l14": (224, 112),
     "dinov2_vitb14_reg": (252, 126),
+    "dinov2_vitl14_reg": (252, 126),
 }
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -106,7 +108,10 @@ class ModelConfig(StrictConfig):
     freeze_backbone: bool = False
     lora_rank: NonNegativeInt = Field(
         default=0,
-        description="If >0, inject LoRA on CLIP attention out_proj (PEFT).",
+        description=(
+            "If >0, inject LoRA on the attention output projection (PEFT): CLIP "
+            "out_proj, DINOv2-L attn.proj."
+        ),
     )
     lora_alpha: PositiveFloat = 16.0
     lora_targets: list[LoraTarget] = Field(
