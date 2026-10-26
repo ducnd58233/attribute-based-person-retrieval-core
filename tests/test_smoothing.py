@@ -56,9 +56,16 @@ def test_neighbour_smooth_rejects_length_mismatch() -> None:
         )
 
 
-def test_package_resolves_default_smoothing_for_clip() -> None:
+def test_package_leaves_smoothing_off_without_a_config_block() -> None:
     module = _load_package_submission()
     config = load_config(ROOT / "configs" / "e17_clip_b16_lpft.yml")
+
+    assert module._resolve_neighbour_smooth(config, disable=False) is None
+
+
+def test_package_uses_an_explicit_smoothing_block() -> None:
+    module = _load_package_submission()
+    config = load_config(ROOT / "configs" / "e74b_gated_smoothing.yml")
 
     resolved = module._resolve_neighbour_smooth(config, disable=False)
 

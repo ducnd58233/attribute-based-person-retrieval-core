@@ -379,10 +379,10 @@ class RankingConfig(StrictConfig):
     neighbour_smooth: NeighbourSmoothConfig | None = Field(
         default=None,
         description="Blend each gallery image's probabilities with its nearest "
-        "neighbours in the pooled-embedding space. None disables smoothing. "
-        "package-submission enables E74b defaults for CLIP/DINOv2 unless "
-        "--no-neighbour-smooth is passed or this field is left null and the "
-        "flag is used; set an explicit block to override k/beta/gate.",
+        "neighbours in the pooled-embedding space. None (the default) disables "
+        "smoothing; package-submission adds it to a package only when this block "
+        "is set, and --no-neighbour-smooth forces it off. An experiment for "
+        "organizer-val measurement; not allowed on the hidden test gallery.",
     )
 
 
