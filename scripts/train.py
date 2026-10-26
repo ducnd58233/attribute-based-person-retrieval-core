@@ -88,6 +88,7 @@ def build_loaders(
         train=config.data.train_augmentation,
         image_size=config.data.image_size,
         degrade_aug=config.data.degrade_aug,
+        augment=config.data,
     )
     eval_transform = transforms_for_model(
         config.model.name, train=False, image_size=config.data.image_size
