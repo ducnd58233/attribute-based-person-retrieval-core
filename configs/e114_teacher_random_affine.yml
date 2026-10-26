@@ -1,7 +1,12 @@
-# E114 H114 — mild RandomAffine on E40/E101 ViT-L teacher recipe.
-# Bars: LODO-M ≥ 0.7282 (+0.010 vs 0.7182); ID-val drop ≤ 0.010 vs 0.7204.
-# Composition frozen: RandomAffine(p=0.5) → Resize → AugMix → flip →
-# ColorJitter 0.2 → Normalize → RandomErasing. Eval clean Resize. resume: true.
+# E114: CLIP ViT-L/14 member with a mild RandomAffine.
+# One of the nine members of the final entry (Codabench 995287); see REPRODUCE.md.
+# Base CLIP-L recipe: frozen CLIP ViT-L/14 at 224x112, LoRA rank 16 on the attention
+# out_proj, AdamW 1e-4, batch 8, 8 epochs, EMA 0.999, PA100k + PETA of the
+# organizer train split. Train pipeline: Resize, AugMix, flip, ColorJitter 0.2,
+# Normalize, RandomErasing p=0.25. Evaluation uses Resize and Normalize only.
+# Change: RandomAffine (rotation 10 deg, translate 0.05, scale 0.9-1.1), p=0.5,
+# before the resize.
+# Backbone: OpenAI CLIP ViT-L/14 (MIT), not trained for pedestrian attributes.
 
 model:
   name: clip_vit_l14

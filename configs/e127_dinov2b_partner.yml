@@ -1,7 +1,9 @@
-# E127 / H127: DINOv2 ViT-B/14-reg partner for an identity probability average
-# with E107 (ViT-L/14 CLIP, degrade). Recipe is E20 verbatim; only the identity
-# TTA, run.name and run.resume differ. Licence: DINOv2 Apache-2.0; not PAR-trained.
-# Bars and controls: experiments/survey-methods-top-teams/E127-clip-l-dinov2b-average.md
+# E127: DINOv2 ViT-B/14-reg member, trained with LP-FT: 2 epochs of linear probe
+# (lr 1e-3), then 8 epochs of full fine-tuning (lr 1e-5, layer decay 0.65),
+# 252x126, batch 32, PA100k + PETA. Checkpoint selection on the original view.
+# One of the nine members of the final entry (Codabench 995287); see REPRODUCE.md.
+# Backbone: DINOv2 (Apache-2.0 code, Meta weights), not trained for pedestrian attributes.
+
 model:
   name: dinov2_vitb14_reg
   pretrained: true

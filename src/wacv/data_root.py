@@ -33,7 +33,7 @@ def dataset_looks_present(data: Path) -> bool:
 def discover_main_checkout_data(project_root: Path) -> Path | None:
     """Return sibling main checkout ``data/`` when this is an experiment worktree.
 
-    Layout expected under the parent workspace::
+    Layout expected when experiment worktrees sit next to the main checkout::
 
         attribute-based-person-retrieval-core/data          # shared
         attribute-based-person-retrieval-core-e34/          # worktree

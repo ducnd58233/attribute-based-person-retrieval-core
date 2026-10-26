@@ -1,9 +1,7 @@
-# E129 H129 — 969857 teacher recipe with LoRA on attention q/k/v (fused
-# in_proj), out_proj and MLP c_fc/c_proj instead of out_proj only. Same rank,
-# schedule, seed and train data (organizer train split, PA100k + PETA).
-# Bars (frozen, workspace HYPOTHESIS H129): identity ID-val >= 0.7304,
-# LODO-M >= 0.7182, proxy <= 240 s. Do not retune rank or targets after val.
-# num_workers 8: DataLoader workers (E120-era configs ran 0, data-bound).
+# E129: an experiment, not part of the final entry. The CLIP-L member recipe with
+# LoRA on attention q/k/v (fused in_proj), out_proj and the MLP c_fc/c_proj
+# instead of out_proj only; same rank, schedule, seed and train data.
+# num_workers 8: DataLoader workers (earlier configs ran 0 and were data-bound).
 
 model:
   name: clip_vit_l14

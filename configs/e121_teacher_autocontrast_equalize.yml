@@ -1,7 +1,11 @@
-# E121 H121 — RandomAutocontrast + RandomEqualize (each p=0.5) on E40 ViT-L teacher.
-# Bars: LODO-M ≥ 0.7282 (+0.010 vs 0.7182); ID-val drop ≤ 0.010 vs 0.7204 (floor 0.7104).
-# Order: AutoContrast → Equalize → Resize → AugMix → flip → ColorJitter → Normalize → Erase.
-# Eval clean Resize. No CLAHE / degrade / RandAugment / affine. resume: true.
+# E121: CLIP ViT-L/14 member with AutoContrast and Equalize.
+# One of the nine members of the final entry (Codabench 995287); see REPRODUCE.md.
+# Base CLIP-L recipe: frozen CLIP ViT-L/14 at 224x112, LoRA rank 16 on the attention
+# out_proj, AdamW 1e-4, batch 8, 8 epochs, EMA 0.999, PA100k + PETA of the
+# organizer train split. Train pipeline: Resize, AugMix, flip, ColorJitter 0.2,
+# Normalize, RandomErasing p=0.25. Evaluation uses Resize and Normalize only.
+# Change: RandomAutocontrast (p=0.5) then RandomEqualize (p=0.5) before the resize.
+# Backbone: OpenAI CLIP ViT-L/14 (MIT), not trained for pedestrian attributes.
 
 model:
   name: clip_vit_l14
