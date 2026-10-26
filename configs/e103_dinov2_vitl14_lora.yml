@@ -1,11 +1,12 @@
-# E103 H103 - DINOv2 ViT-L/14-reg with the E40 teacher recipe (LoRA rank 16 on
-# attn.proj, frozen tower, batch 8, 8 epochs, PA100k+PETA, seed 42, 252x126).
-# Reconstructed 2026-10-26: the original config and builder were lost with their
-# worktree. The model structure is checked against the shipped E103 TorchScript
-# (same state-dict keys and shapes, strict load, same logits); the training
-# values come from the E103 ledger and the E40 config. Selection used 3-view TTA;
-# the final E139 package runs this member with identity TTA.
-# Licence: DINOv2 Apache-2.0 code, Meta research weights; not PAR-trained.
+# E103: DINOv2 ViT-L/14-reg member, the CLIP-L recipe on a DINOv2 tower: frozen,
+# LoRA rank 16 on every attn.proj, 252x126, batch 8, 8 epochs, PA100k + PETA.
+# One of the nine members of the final entry (Codabench 995287); see REPRODUCE.md.
+# This config and its model builder were rewritten after the originals were lost;
+# the model it builds has the same state-dict keys and shapes as the shipped E103
+# weights, loads them strictly and gives the same logits. Checkpoint selection
+# used three views (below); the final package runs this member on the original
+# view only.
+# Backbone: DINOv2 (Apache-2.0 code, Meta weights), not trained for pedestrian attributes.
 
 model:
   name: dinov2_vitl14_reg

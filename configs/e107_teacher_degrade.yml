@@ -1,6 +1,12 @@
-# E107 — ViT-L/14 teacher recipe + E13-style degrade_aug (H107).
-# Bars (identity S*): LODO-M >= teacher 0.7182 + 0.010; ID-val drop <= 0.010 vs 0.7204;
-# V-deg mean >= teacher + 0.005. Licence: OpenAI CLIP (MIT); not PAR-trained.
+# E107: CLIP ViT-L/14 member with camera-degradation augmentation.
+# One of the nine members of the final entry (Codabench 995287); see REPRODUCE.md.
+# Base CLIP-L recipe: frozen CLIP ViT-L/14 at 224x112, LoRA rank 16 on the attention
+# out_proj, AdamW 1e-4, batch 8, 8 epochs, EMA 0.999, PA100k + PETA of the
+# organizer train split. Train pipeline: Resize, AugMix, flip, ColorJitter 0.2,
+# Normalize, RandomErasing p=0.25. Evaluation uses Resize and Normalize only.
+# Change: after the resize, downscale-upscale (scale 0.3-1.0), Gaussian blur
+# (p=0.3) and JPEG re-encoding (quality 30-90).
+# Backbone: OpenAI CLIP ViT-L/14 (MIT), not trained for pedestrian attributes.
 
 model:
   name: clip_vit_l14

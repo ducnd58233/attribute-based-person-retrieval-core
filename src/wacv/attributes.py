@@ -4,7 +4,7 @@ The challenge's attribute order is the order of columns in each gt.csv after
 ``image``. Do not hardcode the list — always read it from the dataset file.
 
 Exclusive-group index maps for categorical scoring follow the official 40-name
-order in PROBLEM-DETAILS.md (Age, Hair, colours, lower type).
+order on the Codabench Track 2 Data page (Age, Hair, colours, lower type).
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ class ExclusiveAttributeGroup:
     has_none: bool = False
 
 
-# Official UPAR order (PROBLEM-DETAILS.md § Attributes). Indices only — names
+# Official UPAR order (Codabench Track 2 Data page, Attributes). Indices only — names
 # are validated at runtime against gt.csv so column reorders fail loudly.
 EXCLUSIVE_ATTRIBUTE_GROUPS: tuple[ExclusiveAttributeGroup, ...] = (
     ExclusiveAttributeGroup("Age", (0, 1, 2)),

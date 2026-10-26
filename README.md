@@ -7,9 +7,11 @@ Retrieval)**.
 scored package, or retrain its nine members and rebuild it), follow
 [`REPRODUCE.md`](REPRODUCE.md).
 
-Research notes and experiment ledgers live in a separate planning workspace
-(`attribute-based-person-retrieval-workspace`, this repo's superproject); they
-are not needed to run anything here.
+Everything needed to understand and reproduce the entry is in this repository:
+`REPRODUCE.md`, the configs under `configs/`, and the code. `AGENTS.md`,
+`CLAUDE.md` and `CURSOR.md` are instructions for the coding assistants used
+during development; they refer to private planning notes and are not needed to
+run anything here.
 
 ## Setup
 

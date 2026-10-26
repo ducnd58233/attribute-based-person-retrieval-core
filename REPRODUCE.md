@@ -23,6 +23,25 @@ This page gives two routes:
 `submission/run.py` in this repository is the `run.py` inside that zip (same
 bytes apart from line endings).
 
+## The S\* ranking stage
+
+Each member outputs 40 attribute logits per gallery image; the package averages
+the members' sigmoid probabilities `p` with the weights above. For a query
+`q` (40 bits) the score has no learned parameters:
+
+1. `D_NLL = -sum_a [q_a log p_a + (1 - q_a) log(1 - p_a)]` and
+   `D_L1 = sum_a |q_a - p_a|`.
+2. Each is min-max normalised per query over the gallery, then mixed:
+   `D = 0.5 * D_NLL + 0.5 * D_L1` (`ranking.distance: hybrid`, `alpha: 0.5`).
+3. Dual softmax over the query set: with `S = -D`,
+   `S' = S + log_softmax_over_queries(S / 0.05)` (`query_norm: dual_softmax`,
+   `query_norm_tau: 0.05`); the gallery is ranked by `-S'` for each query.
+
+Code: `src/wacv/evaluation/distances.py` (`nll_distance`, `l1_distance`,
+`hybrid_distance`), `src/wacv/evaluation/rerank.py` (`dual_softmax_rerank`),
+and their copies in `submission/run.py`. No re-ranking, neighbour smoothing or
+other pass over the gallery is used (`neighbour_smooth: null`).
+
 ## Setup
 
 ```sh

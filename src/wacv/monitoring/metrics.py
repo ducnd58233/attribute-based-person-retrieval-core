@@ -1,7 +1,8 @@
 """The competition's ranking metrics: mADM, mAP, Rank-1/5/10, mINP.
 
-Formulas: the parent workspace's PROBLEM-DETAILS.md, section 6. A gallery
-image is a correct match for a query iff all 40 attributes are equal.
+Formulas: the Evaluation page of the Codabench Track 2 competition
+(https://www.codabench.org/competitions/18196/). A gallery image is a correct
+match for a query iff all 40 attributes are equal.
 """
 
 from __future__ import annotations

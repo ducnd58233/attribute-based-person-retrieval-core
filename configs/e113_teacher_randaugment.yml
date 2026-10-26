@@ -1,7 +1,11 @@
-# E113 H113 — frozen RandAugment on E40/E101 ViT-L teacher recipe.
-# Bars: LODO-M ≥ 0.7282 (+0.010 vs 0.7182); ID-val drop ≤ 0.010 vs 0.7204.
-# Composition frozen: Resize → RandAugment(N=2,M=9) replaces AugMix → flip →
-# ColorJitter 0.2 → Normalize → RandomErasing. Eval clean Resize. resume: true.
+# E113: CLIP ViT-L/14 member with RandAugment.
+# One of the nine members of the final entry (Codabench 995287); see REPRODUCE.md.
+# Base CLIP-L recipe: frozen CLIP ViT-L/14 at 224x112, LoRA rank 16 on the attention
+# out_proj, AdamW 1e-4, batch 8, 8 epochs, EMA 0.999, PA100k + PETA of the
+# organizer train split. Train pipeline: Resize, AugMix, flip, ColorJitter 0.2,
+# Normalize, RandomErasing p=0.25. Evaluation uses Resize and Normalize only.
+# Change: RandAugment (num_ops=2, magnitude=9) replaces AugMix.
+# Backbone: OpenAI CLIP ViT-L/14 (MIT), not trained for pedestrian attributes.
 
 model:
   name: clip_vit_l14

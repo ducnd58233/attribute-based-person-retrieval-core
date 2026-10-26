@@ -2,7 +2,8 @@
 #
 # Mirrors the two constraints that actually bite: no network access, and a
 # submission folder laid out the way the ingestion program hands it to run.py
-# (see PROBLEM-DETAILS.md, Submission page). Passing here is necessary, not
+# (see the Codabench Track 2 Submission page,
+# https://www.codabench.org/competitions/18196/). Passing here is necessary, not
 # sufficient.
 #
 # Usage (from the repo root, after `conda activate wacv`):
