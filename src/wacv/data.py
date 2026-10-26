@@ -18,6 +18,7 @@ from torchvision import transforms
 from src.wacv.attributes import attribute_names_from_columns
 from src.wacv.config import (
     DEFAULT_IMAGE_SIZE,
+    DEFAULT_RANDOM_ERASING_P,
     KNOWN_DOMAINS,
     DataConfig,
     DegradeAugConfig,
@@ -58,6 +59,81 @@ class RandomJpegCompression:
         image.save(buffer, format="JPEG", quality=quality)
         buffer.seek(0)
         return Image.open(buffer).convert("RGB")
+
+
+def _clahe_uint8(
+    channel: np.ndarray,
+    clip_limit: float,
+    tile_grid_size: tuple[int, int],
+) -> np.ndarray:
+    """Clipped histogram equalization on a uint8 2-D channel (tile + bilinear)."""
+    height, width = channel.shape
+    tiles_y, tiles_x = tile_grid_size
+    tile_h = int(np.ceil(height / tiles_y))
+    tile_w = int(np.ceil(width / tiles_x))
+    pad_h = tile_h * tiles_y - height
+    pad_w = tile_w * tiles_x - width
+    padded = np.pad(channel, ((0, pad_h), (0, pad_w)), mode="edge")
+    maps = np.zeros((tiles_y, tiles_x, 256), dtype=np.float32)
+    tile_pixels = float(tile_h * tile_w)
+    clip_threshold = max(1.0, clip_limit * tile_pixels / 256.0)
+    for ty in range(tiles_y):
+        for tx in range(tiles_x):
+            tile = padded[
+                ty * tile_h : (ty + 1) * tile_h,
+                tx * tile_w : (tx + 1) * tile_w,
+            ]
+            hist = np.bincount(tile.ravel(), minlength=256).astype(np.float32)
+            excess = np.maximum(hist - clip_threshold, 0.0).sum()
+            hist = np.minimum(hist, clip_threshold)
+            hist += excess / 256.0
+            cdf = hist.cumsum()
+            positive = cdf[cdf > 0]
+            cdf_min = float(positive.min()) if positive.size else 0.0
+            denom = max(tile_pixels - cdf_min, 1.0)
+            maps[ty, tx] = np.clip(((cdf - cdf_min) / denom) * 255.0, 0.0, 255.0)
+    ys = (np.arange(height, dtype=np.float32) + 0.5) * tiles_y / height - 0.5
+    xs = (np.arange(width, dtype=np.float32) + 0.5) * tiles_x / width - 0.5
+    ys = np.clip(ys, 0.0, tiles_y - 1.001)
+    xs = np.clip(xs, 0.0, tiles_x - 1.001)
+    y0 = np.floor(ys).astype(np.int32)
+    x0 = np.floor(xs).astype(np.int32)
+    y1 = np.minimum(y0 + 1, tiles_y - 1)
+    x1 = np.minimum(x0 + 1, tiles_x - 1)
+    wy = (ys - y0).astype(np.float32)[:, None]
+    wx = (xs - x0).astype(np.float32)[None, :]
+    src = channel.astype(np.int32)
+    y0g = y0[:, None]
+    y1g = y1[:, None]
+    x0g = x0[None, :]
+    x1g = x1[None, :]
+    top = maps[y0g, x0g, src] * (1.0 - wx) + maps[y0g, x1g, src] * wx
+    bot = maps[y1g, x0g, src] * (1.0 - wx) + maps[y1g, x1g, src] * wx
+    out = top * (1.0 - wy) + bot * wy
+    return np.clip(out, 0.0, 255.0).astype(np.uint8)
+
+
+class RandomCLAHE:
+    """Probabilistic CLAHE on the PIL LAB L-channel (train-only; no OpenCV)."""
+
+    def __init__(
+        self,
+        clip_limit: float = 2.0,
+        tile_grid_size: tuple[int, int] = (8, 8),
+        p: float = 0.5,
+    ) -> None:
+        self._clip_limit = float(clip_limit)
+        self._tile_grid_size = (int(tile_grid_size[0]), int(tile_grid_size[1]))
+        self._p = float(p)
+
+    def __call__(self, image: Image.Image) -> Image.Image:
+        if random.random() >= self._p:
+            return image
+        lab = np.asarray(image.convert("LAB"), dtype=np.uint8).copy()
+        lab[:, :, 0] = _clahe_uint8(
+            lab[:, :, 0], self._clip_limit, self._tile_grid_size
+        )
+        return Image.fromarray(lab, mode="LAB").convert("RGB")
 
 
 # T28 / E81: fixed V-deg severities (organizer val only; no hue ops).
@@ -137,18 +213,76 @@ def _eval_transform(
     )
 
 
+def _pre_resize_steps(augment: DataConfig | None) -> list[object]:
+    """Optional train-only steps on the full-size image, in a fixed order."""
+    if augment is None:
+        return []
+    steps: list[object] = []
+    contrast = augment.autocontrast_equalize
+    if contrast.enabled:
+        steps += [
+            transforms.RandomAutocontrast(p=contrast.autocontrast_p),
+            transforms.RandomEqualize(p=contrast.equalize_p),
+        ]
+    clahe = augment.clahe
+    if clahe.enabled:
+        steps.append(
+            RandomCLAHE(
+                clip_limit=clahe.clip_limit,
+                tile_grid_size=clahe.tile_grid_size,
+                p=clahe.p,
+            )
+        )
+    affine = augment.random_affine
+    if affine.enabled:
+        steps.append(
+            transforms.RandomApply(
+                [
+                    transforms.RandomAffine(
+                        degrees=affine.degrees,
+                        translate=(affine.translate, affine.translate),
+                        scale=affine.scale,
+                    )
+                ],
+                p=affine.p,
+            )
+        )
+    return steps
+
+
+def _policy_step(augment: DataConfig | None) -> object:
+    """AugMix, unless the config picks RandAugment or TrivialAugmentWide."""
+    if augment is not None and augment.rand_augment.enabled:
+        policy = augment.rand_augment
+        return transforms.RandAugment(
+            num_ops=policy.num_ops, magnitude=policy.magnitude
+        )
+    if augment is not None and augment.trivial_augment.enabled:
+        return transforms.TrivialAugmentWide()
+    return transforms.AugMix()
+
+
+def _random_erasing_p(augment: DataConfig | None) -> float:
+    if augment is None:
+        return DEFAULT_RANDOM_ERASING_P
+    return augment.random_erasing_p
+
+
 def _train_transform(
-    size: tuple[int, int], stats: NormalizationStats
+    size: tuple[int, int],
+    stats: NormalizationStats,
+    augment: DataConfig | None = None,
 ) -> transforms.Compose:
     return transforms.Compose(
         [
+            *_pre_resize_steps(augment),
             transforms.Resize(size),
-            transforms.AugMix(),
+            _policy_step(augment),
             transforms.RandomHorizontalFlip(),
             transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
             transforms.ToTensor(),
             transforms.Normalize(mean=stats.mean, std=stats.std),
-            transforms.RandomErasing(p=0.25),
+            transforms.RandomErasing(p=_random_erasing_p(augment)),
         ]
     )
 
@@ -157,11 +291,13 @@ def _train_transform_degrade(
     size: tuple[int, int],
     degrade: DegradeAugConfig,
     stats: NormalizationStats,
+    augment: DataConfig | None = None,
 ) -> transforms.Compose:
     scale_lo, scale_hi = degrade.downscale
     jpeg_lo, jpeg_hi = degrade.jpeg
     return transforms.Compose(
         [
+            *_pre_resize_steps(augment),
             transforms.Resize(size),
             RandomDownscaleUpsample(scale_lo, scale_hi),
             transforms.RandomApply(
@@ -169,7 +305,7 @@ def _train_transform_degrade(
                 p=degrade.blur_p,
             ),
             RandomJpegCompression(jpeg_lo, jpeg_hi),
-            transforms.AugMix(),
+            _policy_step(augment),
             transforms.RandomHorizontalFlip(),
             transforms.ColorJitter(
                 brightness=0.2,
@@ -179,7 +315,7 @@ def _train_transform_degrade(
             ),
             transforms.ToTensor(),
             transforms.Normalize(mean=stats.mean, std=stats.std),
-            transforms.RandomErasing(p=0.25),
+            transforms.RandomErasing(p=_random_erasing_p(augment)),
         ]
     )
 
@@ -191,8 +327,14 @@ def transforms_for_model(
     image_size: tuple[int, int] = DEFAULT_IMAGE_SIZE,
     degrade_aug: DegradeAugConfig | None = None,
     val_degrade: str | None = None,
+    augment: DataConfig | None = None,
 ) -> transforms.Compose:
-    """Pick the model family's preprocessing at ``image_size`` (H, W)."""
+    """Pick the model family's preprocessing at ``image_size`` (H, W).
+
+    ``augment`` supplies the train-only options (CLAHE, RandAugment,
+    TrivialAugmentWide, RandomAffine, AutoContrast + Equalize, the Random
+    Erasing probability); ``None`` keeps the default pipeline.
+    """
     stats = normalization_for_model(model_name)
     if val_degrade is not None and train:
         raise ValueError("val_degrade is eval-only; refuse train=True")
@@ -203,8 +345,8 @@ def transforms_for_model(
             )
         return _eval_transform(image_size, stats)
     if degrade_aug is not None and degrade_aug.enabled:
-        return _train_transform_degrade(image_size, degrade_aug, stats)
-    return _train_transform(image_size, stats)
+        return _train_transform_degrade(image_size, degrade_aug, stats, augment)
+    return _train_transform(image_size, stats, augment)
 
 
 def load_gt(csv_path: Path) -> pd.DataFrame:

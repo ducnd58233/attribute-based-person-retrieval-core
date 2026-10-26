@@ -63,6 +63,7 @@ JpegQualityRange = Annotated[
 # Default (H, W) crop, and the native crop of each fixed-geometry ViT tower.
 # The tower builders and the data transforms must agree on it.
 DEFAULT_IMAGE_SIZE: tuple[int, int] = (256, 128)
+DEFAULT_RANDOM_ERASING_P = 0.25
 MODEL_NATIVE_IMAGE_SIZE: dict[str, tuple[int, int]] = {
     "clip_vit_b16": (256, 128),
     "clip_vit_l14": (224, 112),
@@ -147,6 +148,56 @@ class DegradeAugConfig(StrictConfig):
         return self
 
 
+class ClaheConfig(StrictConfig):
+    """Train-only CLAHE on PIL LAB L-channel; eval stays clean Resize."""
+
+    enabled: bool = False
+    clip_limit: float = Field(default=2.0, gt=0.0)
+    tile_grid_size: ImageSize = (8, 8)
+    p: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
+class RandAugmentConfig(StrictConfig):
+    """Train-only frozen torchvision RandAugment; eval stays clean Resize."""
+
+    enabled: bool = False
+    num_ops: PositiveInt = 2
+    magnitude: NonNegativeInt = 9
+
+
+class TrivialAugmentConfig(StrictConfig):
+    """Train-only frozen torchvision TrivialAugmentWide; eval stays clean Resize."""
+
+    enabled: bool = False
+
+
+class RandomAffineConfig(StrictConfig):
+    """Train-only mild RandomAffine; eval stays clean Resize."""
+
+    enabled: bool = False
+    degrees: float = Field(default=10.0, ge=0.0)
+    translate: float = Field(default=0.05, ge=0.0, le=1.0)
+    scale: FloatPair = (0.9, 1.1)
+    p: float = Field(default=0.5, ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def _check_scale(self) -> Self:
+        scale_lo, scale_hi = self.scale
+        if not (0.0 < scale_lo <= scale_hi):
+            raise ValueError(
+                f"random_affine.scale must satisfy 0 < min <= max, got {self.scale}"
+            )
+        return self
+
+
+class AutocontrastEqualizeConfig(StrictConfig):
+    """Train-only RandomAutocontrast + RandomEqualize; eval stays clean Resize."""
+
+    enabled: bool = False
+    autocontrast_p: float = Field(default=0.5, ge=0.0, le=1.0)
+    equalize_p: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
 class DataConfig(StrictConfig):
     root: ConfigPath = Path("data")
     batch_size: PositiveInt = 32
@@ -164,6 +215,28 @@ class DataConfig(StrictConfig):
     eval_domains: list[DomainName] | None = None
     image_size: ImageSize = DEFAULT_IMAGE_SIZE
     degrade_aug: DegradeAugConfig = Field(default_factory=DegradeAugConfig)
+    clahe: ClaheConfig = Field(default_factory=ClaheConfig)
+    rand_augment: RandAugmentConfig = Field(default_factory=RandAugmentConfig)
+    trivial_augment: TrivialAugmentConfig = Field(default_factory=TrivialAugmentConfig)
+    random_affine: RandomAffineConfig = Field(default_factory=RandomAffineConfig)
+    autocontrast_equalize: AutocontrastEqualizeConfig = Field(
+        default_factory=AutocontrastEqualizeConfig
+    )
+    random_erasing_p: float = Field(
+        default=DEFAULT_RANDOM_ERASING_P,
+        ge=0.0,
+        le=1.0,
+        description="Train-only RandomErasing probability; eval stays clean.",
+    )
+
+    @model_validator(mode="after")
+    def _check_one_policy(self) -> Self:
+        if self.rand_augment.enabled and self.trivial_augment.enabled:
+            raise ValueError(
+                "rand_augment and trivial_augment both replace AugMix; "
+                "enable at most one"
+            )
+        return self
 
 
 class AsmrAuxConfig(StrictConfig):
