@@ -1,0 +1,58 @@
+# E127 / H127: DINOv2 ViT-B/14-reg partner for an identity probability average
+# with E107 (ViT-L/14 CLIP, degrade). Recipe is E20 verbatim; only the identity
+# TTA, run.name and run.resume differ. Licence: DINOv2 Apache-2.0; not PAR-trained.
+# Bars and controls: experiments/survey-methods-top-teams/E127-clip-l-dinov2b-average.md
+model:
+  name: dinov2_vitb14_reg
+  pretrained: true
+  dropout: 0.1
+  # weights_path: data/pretrained/dinov2_vitb14_reg4_pretrain.pth
+
+data:
+  root: data
+  batch_size: 32
+  # Windows: 4 workers previously exited mid-LP (DataLoader Empty); 2 is stabler.
+  num_workers: 2
+  limit: null
+  train_augmentation: true
+  image_size: [252, 126]
+  train_domains:
+    - PA100k
+    - PETA
+
+optimization:
+  epochs: 8
+  learning_rate: 0.00001
+  weight_decay: 0.01
+  pos_weight_clip: 10.0
+  amp: true
+  grad_clip_norm: 1.0
+  ema_decay: 0.999
+  scheduler_factor: 0.1
+  scheduler_patience: 2
+  label_smoothing: 0.05
+  early_stop_patience: 4
+  lp_ft: true
+  lp_epochs: 2
+  lp_learning_rate: 0.001
+  layer_decay: 0.65
+
+run:
+  name: e127_dinov2b_partner
+  output_dir: runs
+  resume: true
+  seed: 42
+  device: auto
+  progress: true
+
+ranking:
+  distance: hybrid
+  temperature: 1.0
+  alpha: 0.5
+  query_norm: dual_softmax
+  query_norm_tau: 0.05
+
+inference:
+  tta:
+    - identity
+  tta_scale: 1.15

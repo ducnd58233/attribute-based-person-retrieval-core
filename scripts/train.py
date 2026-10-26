@@ -172,6 +172,31 @@ def maybe_wrap_logit_adjust(
     return LogitAdjustedLoss(criterion, offset)
 
 
+def _checkpoint_is_full_ft(path: Path) -> bool:
+    """True when ``path`` holds a layer-wise FT optimizer (not LP's single group)."""
+    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+    if not isinstance(checkpoint, dict):
+        return False
+    optimizer = checkpoint.get("optimizer")
+    if not isinstance(optimizer, dict):
+        return False
+    groups = optimizer.get("param_groups")
+    return isinstance(groups, list) and len(groups) > 1
+
+
+def _build_full_ft_optimizer(
+    model: ClipAttributeClassifier | Dinov2AttributeClassifier,
+    config: ExperimentConfig,
+) -> torch.optim.Optimizer:
+    model.unfreeze_backbone()
+    ft_groups = model.layerwise_param_groups(
+        learning_rate=config.optimization.learning_rate,
+        weight_decay=config.optimization.weight_decay,
+        layer_decay=config.optimization.layer_decay,
+    )
+    return torch.optim.AdamW(ft_groups)
+
+
 def _run_linear_probe_stage(
     *,
     model: ClipAttributeClassifier | Dinov2AttributeClassifier,
@@ -188,11 +213,22 @@ def _run_linear_probe_stage(
 
     train_loader, val_loader, ranking, asmr_context = fit_data
     model.freeze_backbone()
+    # LP must not reload an FT checkpoint's many param groups into the probe
+    # AdamW; it resumes only from a probe last.pt (single group).
+    resume_path = config.run.resume
+    resumes_probe = (
+        isinstance(resume_path, Path)
+        and resume_path.is_file()
+        and not _checkpoint_is_full_ft(resume_path)
+    )
     lp_config = config.model_copy(
         update={
             "optimization": config.optimization.model_copy(
                 update={"epochs": config.optimization.lp_epochs}
-            )
+            ),
+            "run": config.run.model_copy(
+                update={"resume": resume_path if resumes_probe else None}
+            ),
         }
     )
     lp_optimizer = torch.optim.AdamW(
@@ -220,19 +256,54 @@ def _run_linear_probe_stage(
         lp_config,
         asmr_context=asmr_context,
     ).fit(train_loader, val_loader, ranking=ranking)
-    model.unfreeze_backbone()
-    ft_groups = model.layerwise_param_groups(
-        learning_rate=config.optimization.learning_rate,
-        weight_decay=config.optimization.weight_decay,
-        layer_decay=config.optimization.layer_decay,
-    )
     tracker.logger.info(
         "LP-FT stage 2: full FT epochs=%d base_lr=%s layer_decay=%s",
         config.optimization.epochs,
         config.optimization.learning_rate,
         config.optimization.layer_decay,
     )
-    return torch.optim.AdamW(ft_groups)
+    return _build_full_ft_optimizer(model, config)
+
+
+def _lp_ft_optimizer(
+    *,
+    model: ClipAttributeClassifier | Dinov2AttributeClassifier,
+    criterion: torch.nn.Module,
+    device: torch.device,
+    tracker: RunTracker,
+    config: ExperimentConfig,
+    fit_data: tuple[
+        DataLoader, DataLoader, RankingEvalData | None, AsmrTrainContext | None
+    ],
+) -> tuple[torch.optim.Optimizer, ExperimentConfig]:
+    """Stage-2 optimizer of an LP-FT run, and the config stage 2 trains with.
+
+    A ``last.pt`` written by stage 2 resumes fine-tuning directly. Otherwise the
+    probe runs first and stage 2 starts from its in-memory weights.
+    """
+    resume_path = config.run.resume
+    if (
+        isinstance(resume_path, Path)
+        and resume_path.is_file()
+        and _checkpoint_is_full_ft(resume_path)
+    ):
+        tracker.logger.info(
+            "LP-FT: skipping linear probe; resuming full FT from %s", resume_path
+        )
+        return _build_full_ft_optimizer(model, config), config
+    optimizer = _run_linear_probe_stage(
+        model=model,
+        criterion=criterion,
+        device=device,
+        tracker=tracker,
+        config=config,
+        fit_data=fit_data,
+    )
+    # The probe's last.pt optimizer has one group and the FT AdamW has
+    # layer-wise groups, so stage 2 must not reload it (ValueError otherwise).
+    return optimizer, config.model_copy(
+        update={"run": config.run.model_copy(update={"resume": None})}
+    )
 
 
 def main() -> None:
@@ -285,10 +356,11 @@ def main() -> None:
             ranking is not None,
             config.optimization.lp_ft,
         )
+        train_config = config
         if config.optimization.lp_ft and isinstance(
             model, ClipAttributeClassifier | Dinov2AttributeClassifier
         ):
-            optimizer = _run_linear_probe_stage(
+            optimizer, train_config = _lp_ft_optimizer(
                 model=model,
                 criterion=criterion,
                 device=device,
@@ -314,7 +386,7 @@ def main() -> None:
             criterion,
             device,
             tracker,
-            config,
+            train_config,
             asmr_context=asmr_context,
         ).fit(train_loader, val_loader, ranking=ranking)
         tracker.logger.info(
