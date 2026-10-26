@@ -1,10 +1,13 @@
-"""DINOv2 ViT-B/14 with registers as an attribute classifier (252x126 LP-FT).
+"""DINOv2 ViT-B/14 and ViT-L/14 with registers as attribute classifiers (252x126).
+
+ViT-B/14 trains with LP-FT; ViT-L/14 keeps its tower frozen and trains LoRA on
+every attention output projection plus the head (the E103 recipe).
 
 Weight loading (do not commit checkpoints into git). The architecture always
 comes from torch.hub at the pinned commit ``DINOV2_HUB_COMMIT``:
 
 1. **Hub weights (``pretrained=True`` and no ``weights_path``)**: the hub entry
-   also downloads the official ``dinov2_vitb14_reg4_pretrain.pth``.
+   also downloads the official ``dinov2_vit{b,l}14_reg4_pretrain.pth``.
 
 2. **Local / vendored path (``model.weights_path``)**: hub is called with
    ``pretrained=False`` (use a pre-populated ``$TORCH_HOME/hub`` cache offline),
@@ -25,6 +28,7 @@ from src.wacv.models._common import (
     classification_head,
     set_requires_grad,
 )
+from src.wacv.models.lora import inject_lora_into_linear
 
 DINOV2_HUB_REPO = "facebookresearch/dinov2"
 # Immutable upstream commit (main on 2026-06-03, "Safely load weights from
@@ -32,6 +36,7 @@ DINOV2_HUB_REPO = "facebookresearch/dinov2"
 # default branch holds on the day it is launched.
 DINOV2_HUB_COMMIT = "7764ea0f912e53c92e82eb78a2a1631e92725fc8"
 DINOV2_HUB_ENTRY = "dinov2_vitb14_reg"
+DINOV2_L_HUB_ENTRY = "dinov2_vitl14_reg"
 
 _PATCH_SIZE = 14
 _TARGET_H, _TARGET_W = MODEL_NATIVE_IMAGE_SIZE["dinov2_vitb14_reg"]
@@ -69,8 +74,26 @@ class Dinov2AttributeClassifier(nn.Module):
         return self.head(self.encode_features(images))
 
     def freeze_backbone(self) -> None:
-        """Freeze the vision tower (linear-probe stage)."""
-        set_requires_grad(self.backbone, False)
+        """Freeze the vision tower; keep LoRA adapter weights trainable."""
+        for name, parameter in self.backbone.named_parameters():
+            parameter.requires_grad = "lora_" in name
+
+    def add_lora_adapters(self, *, rank: int, alpha: float = 16.0) -> int:
+        """Add LoRA to every block's attention output projection; return count.
+
+        Base tower weights stay frozen; only LoRA A/B (and the head) train.
+        """
+        self.freeze_backbone()
+        adapted = 0
+        for block in self._blocks():
+            projection = block.get_submodule("attn.proj")
+            if not isinstance(projection, nn.Linear):
+                raise TypeError(
+                    f"expected attn.proj to be Linear, got {type(projection)}"
+                )
+            inject_lora_into_linear(projection, rank=rank, alpha=alpha)
+            adapted += 1
+        return adapted
 
     def unfreeze_backbone(self) -> None:
         """Unfreeze the vision tower (full fine-tune stage)."""
@@ -100,12 +123,13 @@ class Dinov2AttributeClassifier(nn.Module):
         )
 
 
-def load_dinov2_vitb14_reg_backbone(
+def load_dinov2_backbone(
     *,
     pretrained: bool,
     weights_path: Path | None = None,
+    entry: str = DINOV2_HUB_ENTRY,
 ) -> nn.Module:
-    """Resolve ``dinov2_vitb14_reg`` via torch.hub and optional local weights.
+    """Resolve hub ``entry`` (ViT-B/14-reg by default) and optional local weights.
 
     When ``weights_path`` is set, hub is called with ``pretrained=False`` and
     the file is loaded with ``torch.load`` (CPU map). When ``pretrained`` is
@@ -114,7 +138,7 @@ def load_dinov2_vitb14_reg_backbone(
     load_pretrained = bool(pretrained) and weights_path is None
     backbone = torch.hub.load(
         f"{DINOV2_HUB_REPO}:{DINOV2_HUB_COMMIT}",
-        DINOV2_HUB_ENTRY,
+        entry,
         pretrained=load_pretrained,
         # torch accepts a bool here; its type stub declares ``str``.
         trust_repo=cast("str", True),
@@ -135,26 +159,27 @@ def load_dinov2_vitb14_reg_backbone(
     return backbone
 
 
-def build_dinov2_vitb14_reg(
+def _attribute_classifier(
     *,
+    entry: str,
     num_attributes: int,
     pretrained: bool,
     dropout: float,
-    weights_path: Path | None = None,
-    image_height: int = _TARGET_H,
-    image_width: int = _TARGET_W,
+    weights_path: Path | None,
+    image_size: tuple[int, int],
 ) -> Dinov2AttributeClassifier:
-    """Build DINOv2 ViT-B/14-reg with a linear attribute head.
+    """Hub ``entry`` tower plus a linear attribute head.
 
     Positional embeddings are interpolated at forward time by DINOv2 for any
     H×W divisible by patch size 14 (252×126 → 18×9 patches).
     """
+    image_height, image_width = image_size
     if image_height % _PATCH_SIZE != 0 or image_width % _PATCH_SIZE != 0:
         raise ValueError(
             f"image size {(image_height, image_width)} not divisible by {_PATCH_SIZE}"
         )
-    backbone = load_dinov2_vitb14_reg_backbone(
-        pretrained=pretrained, weights_path=weights_path
+    backbone = load_dinov2_backbone(
+        pretrained=pretrained, weights_path=weights_path, entry=entry
     )
     feature_dim = int(cast(_HasEmbedDim, backbone).embed_dim)
     head = classification_head(feature_dim, num_attributes, dropout)
@@ -164,3 +189,45 @@ def build_dinov2_vitb14_reg(
         feature_dim=feature_dim,
         image_size=(image_height, image_width),
     )
+
+
+def build_dinov2_vitb14_reg(
+    *,
+    num_attributes: int,
+    pretrained: bool,
+    dropout: float,
+    weights_path: Path | None = None,
+    image_height: int = _TARGET_H,
+    image_width: int = _TARGET_W,
+) -> Dinov2AttributeClassifier:
+    """Build DINOv2 ViT-B/14-reg with a linear attribute head."""
+    return _attribute_classifier(
+        entry=DINOV2_HUB_ENTRY,
+        num_attributes=num_attributes,
+        pretrained=pretrained,
+        dropout=dropout,
+        weights_path=weights_path,
+        image_size=(image_height, image_width),
+    )
+
+
+def build_dinov2_vitl14_reg(
+    *,
+    num_attributes: int,
+    pretrained: bool,
+    dropout: float,
+    weights_path: Path | None = None,
+    lora_rank: int = 16,
+    lora_alpha: float = 16.0,
+) -> Dinov2AttributeClassifier:
+    """DINOv2 ViT-L/14-reg at 252x126, frozen, with LoRA on every attn.proj."""
+    model = _attribute_classifier(
+        entry=DINOV2_L_HUB_ENTRY,
+        num_attributes=num_attributes,
+        pretrained=pretrained,
+        dropout=dropout,
+        weights_path=weights_path,
+        image_size=MODEL_NATIVE_IMAGE_SIZE["dinov2_vitl14_reg"],
+    )
+    model.add_lora_adapters(rank=lora_rank, alpha=lora_alpha)
+    return model

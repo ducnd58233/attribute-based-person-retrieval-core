@@ -1,0 +1,63 @@
+# E103 H103 - DINOv2 ViT-L/14-reg with the E40 teacher recipe (LoRA rank 16 on
+# attn.proj, frozen tower, batch 8, 8 epochs, PA100k+PETA, seed 42, 252x126).
+# Reconstructed 2026-10-26: the original config and builder were lost with their
+# worktree. The model structure is checked against the shipped E103 TorchScript
+# (same state-dict keys and shapes, strict load, same logits); the training
+# values come from the E103 ledger and the E40 config. Selection used 3-view TTA;
+# the final E139 package runs this member with identity TTA.
+# Licence: DINOv2 Apache-2.0 code, Meta research weights; not PAR-trained.
+
+model:
+  name: dinov2_vitl14_reg
+  pretrained: true
+  dropout: 0.1
+  freeze_backbone: true
+  lora_rank: 16
+  lora_alpha: 16.0
+
+data:
+  root: data
+  batch_size: 8
+  num_workers: 4
+  limit: null
+  train_augmentation: true
+  image_size: [252, 126]
+  train_domains:
+    - PA100k
+    - PETA
+
+optimization:
+  epochs: 8
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  pos_weight_clip: 10.0
+  amp: true
+  grad_clip_norm: 1.0
+  ema_decay: 0.999
+  scheduler_factor: 0.1
+  scheduler_patience: 2
+  label_smoothing: 0.05
+  early_stop_patience: 4
+  lp_ft: false
+
+run:
+  name: e103_dinov2_vitl14_lora
+  output_dir: runs
+  resume: true
+  seed: 42
+  device: auto
+  progress: true
+
+ranking:
+  distance: hybrid
+  temperature: 1.0
+  alpha: 0.5
+  query_norm: dual_softmax
+  query_norm_tau: 0.05
+
+inference:
+  tta:
+    - identity
+    - hflip
+    - scale_crop
+  tta_scale: 1.15
