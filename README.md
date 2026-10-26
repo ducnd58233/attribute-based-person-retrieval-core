@@ -1,9 +1,15 @@
 # attribute-based-person-retrieval-core
 
 Solution code for **WACV 2027 UPAR Challenge Track 2 (Attribute-based Person
-Retrieval)**. Competition rules, research, and plan live in the parent
-workspace (`attribute-based-person-retrieval-workspace`, this repo's
-superproject) — start there, not here, for context.
+Retrieval)**.
+
+**To reproduce the final entry** (Codabench submission 995287: download the
+scored package, or retrain its nine members and rebuild it), follow
+[`REPRODUCE.md`](REPRODUCE.md).
+
+Research notes and experiment ledgers live in a separate planning workspace
+(`attribute-based-person-retrieval-workspace`, this repo's superproject); they
+are not needed to run anything here.
 
 ## Setup
 
