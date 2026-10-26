@@ -11,7 +11,8 @@ model:
 data:
   root: data
   batch_size: 32
-  num_workers: 4
+  # Windows: 4 workers previously exited mid-LP (DataLoader Empty); 2 is stabler.
+  num_workers: 2
   limit: null
   train_augmentation: true
   image_size: [252, 126]
